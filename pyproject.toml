@@ -1,0 +1,170 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "speakerscribe"
+version = "0.1.0"
+description = "Speech-to-text with speaker diarization — Whisper + pyannote, optimized for Google Colab"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Néstor Enrique Forero Herrera", email = "enrique.economista@gmail.com" },
+]
+keywords = [
+    "speech-to-text",
+    "whisper",
+    "diarization",
+    "pyannote",
+    "asr",
+    "transcription",
+    "speaker-diarization",
+    "faster-whisper",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "faster-whisper>=1.2.1,<2.0",
+    "pyannote.audio>=4.0,<5.0",
+    "pydantic>=2.5,<3.0",
+    "loguru>=0.7,<1.0",
+    "typer>=0.12,<1.0",
+    "rich>=13.7,<15.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-mock>=3.12",
+    "ruff>=0.9.0",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+speakerscribe = "speakerscribe.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/EnriqueForero/speakerscribe"
+Repository = "https://github.com/EnriqueForero/speakerscribe"
+Issues = "https://github.com/EnriqueForero/speakerscribe/issues"
+Documentation = "https://github.com/EnriqueForero/speakerscribe#readme"
+
+# ─── Hatchling ─────────────────────────────────────────────────────
+[tool.hatch.build.targets.wheel]
+packages = ["speakerscribe"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/speakerscribe",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+    "/CHANGELOG.md",
+]
+
+# ─── Pytest ────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--cov=speakerscribe",
+    "--cov-report=term-missing",
+    "--cov-fail-under=40",
+]
+markers = [
+    "slow: tests that take >5 seconds",
+    "integration: tests requiring GPU or network (skip in CI)",
+    "gpu: tests requiring CUDA GPU",
+]
+
+[tool.coverage.run]
+source = ["speakerscribe"]
+omit = [
+    "*/cli.py",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
+# ─── Ruff (lint + format) ──────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["speakerscribe", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "N",    # pep8-naming
+    "RUF",  # ruff-specific
+    "PTH",  # flake8-use-pathlib
+]
+ignore = [
+    "E501",     # line too long (handled by formatter)
+    "PLR0913",  # too many arguments
+    "PLR0912",  # too many branches
+    "PLR0915",  # too many statements
+    "PLR2004",  # magic value comparison
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]
+"speakerscribe/cli.py" = ["B008"]  # typer uses default values with Annotated
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ─── Mypy ──────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_return_any = false
+no_implicit_reexport = true
+show_error_codes = true
+pretty = true
+
+[[tool.mypy.overrides]]
+module = [
+    "faster_whisper.*",
+    "pyannote.*",
+    "google.colab.*",
+    "torch.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
