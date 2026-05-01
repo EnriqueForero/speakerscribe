@@ -317,8 +317,7 @@ class WorkspacePaths(BaseModel):
         """
         if not self.data.exists():
             raise FileNotFoundError(
-                f"Folder not found: {self.data}. "
-                f"Create it and place your audio/video files there."
+                f"Folder not found: {self.data}. Create it and place your audio/video files there."
             )
         return sorted(
             p for p in self.data.iterdir() if p.is_file() and p.suffix.lower() in extensions

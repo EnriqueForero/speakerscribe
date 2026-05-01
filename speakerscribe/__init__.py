@@ -29,7 +29,7 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__: str = version("speakerscribe")
 except PackageNotFoundError:
-    __version__ = "0.0.0+dev"
+    __version__ = "0.1.0"
 
 # ─── Public API ────────────────────────────────────────────────────
 from speakerscribe.config import (
@@ -57,10 +57,10 @@ from speakerscribe.quality import (
 )
 
 __all__ = [
-    "QualityFlag",
-    "QualityReport",
     "SPK_NO_DIARIZATION",
     "SPK_NO_OVERLAP",
+    "QualityFlag",
+    "QualityReport",
     "Severity",
     "TranscriptionConfig",
     "WorkspacePaths",

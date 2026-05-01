@@ -62,9 +62,7 @@ def delete_all_outputs(paths: WorkspacePaths, confirm: str = "") -> int:
         ValueError: If `confirm` is not exactly `"YES DELETE ALL"`.
     """
     if confirm != "YES DELETE ALL":
-        raise ValueError(
-            'Confirmation required. Pass confirm="YES DELETE ALL" to proceed.'
-        )
+        raise ValueError('Confirmation required. Pass confirm="YES DELETE ALL" to proceed.')
 
     deleted = 0
     for folder in [paths.transcripts, paths.splits, paths.diar_cache, paths.audio_tmp]:
@@ -143,9 +141,7 @@ def rename_speakers_in_outputs(
 
     for k in mapping:
         if not k.startswith("SPEAKER_"):
-            raise ValueError(
-                f"Mapping keys must start with 'SPEAKER_'. Got: '{k}'"
-            )
+            raise ValueError(f"Mapping keys must start with 'SPEAKER_'. Got: '{k}'")
 
     logger.info(f"Renaming speakers for '{base_name}'...")
     for k, v in mapping.items():
@@ -183,7 +179,7 @@ def rename_speakers_in_outputs(
                 if seg.get("speaker") in mapping:
                     seg["speaker"] = mapping[seg["speaker"]]
                     n_json += 1
-        if "speakers_summary" in data and data["speakers_summary"]:
+        if data.get("speakers_summary"):
             data["speakers_summary"] = {
                 mapping.get(k, k): v for k, v in data["speakers_summary"].items()
             }

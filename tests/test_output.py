@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from speakerscribe.output import generate_transcript_md, split_text_by_words
 
 

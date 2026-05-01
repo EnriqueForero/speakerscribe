@@ -94,9 +94,7 @@ def diarize_audio(
         if config.max_speakers is not None:
             diar_kwargs["max_speakers"] = config.max_speakers
         if diar_kwargs:
-            logger.info(
-                f"   Speakers: min={config.min_speakers} max={config.max_speakers}"
-            )
+            logger.info(f"   Speakers: min={config.min_speakers} max={config.max_speakers}")
         else:
             logger.info("   Speakers: auto-detect")
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from speakerscribe.quality import (
     QualityFlag,
     Severity,
@@ -21,8 +19,12 @@ def _good_metadata() -> dict:
         "speakers_summary": {"SPEAKER_00": 60, "SPEAKER_01": 40},
         "segments": [
             # Use varied text to avoid triggering WORD_DOMINANCE heuristic
-            {"id": i, "text": f"The speaker said something meaningful on topic {i}.",
-             "start": float(i), "end": float(i + 1)}
+            {
+                "id": i,
+                "text": f"The speaker said something meaningful on topic {i}.",
+                "start": float(i),
+                "end": float(i + 1),
+            }
             for i in range(50)
         ],
     }

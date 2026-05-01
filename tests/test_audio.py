@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from speakerscribe.audio import (
     calculate_file_hash,
     format_hms,

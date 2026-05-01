@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -54,9 +54,12 @@ def _version_callback(value: bool) -> None:
 @app.callback()
 def main(
     version: Annotated[
-        Optional[bool],
+        bool | None,
         typer.Option(
-            "--version", "-V", callback=_version_callback, is_eager=True,
+            "--version",
+            "-V",
+            callback=_version_callback,
+            is_eager=True,
             help="Show version and exit.",
         ),
     ] = None,
@@ -73,12 +76,12 @@ def process(
     model: Annotated[
         str, typer.Option("--model", "-m", help="Whisper model name.")
     ] = "large-v3-turbo",
-    language: Annotated[Optional[str], typer.Option("--language", "-l")] = None,
+    language: Annotated[str | None, typer.Option("--language", "-l")] = None,
     beam_size: Annotated[int, typer.Option("--beam-size", "-b", min=1, max=10)] = 5,
     no_diar: Annotated[bool, typer.Option("--no-diar", help="Disable diarization.")] = False,
-    num_speakers: Annotated[Optional[int], typer.Option("--num-speakers", "-n")] = None,
-    min_speakers: Annotated[Optional[int], typer.Option("--min-speakers")] = None,
-    max_speakers: Annotated[Optional[int], typer.Option("--max-speakers")] = None,
+    num_speakers: Annotated[int | None, typer.Option("--num-speakers", "-n")] = None,
+    min_speakers: Annotated[int | None, typer.Option("--min-speakers")] = None,
+    max_speakers: Annotated[int | None, typer.Option("--max-speakers")] = None,
     word_timestamps: Annotated[
         bool, typer.Option("--word-timestamps/--no-word-timestamps")
     ] = False,
@@ -87,7 +90,7 @@ def process(
     ] = False,
     force: Annotated[bool, typer.Option("--force/--no-force")] = False,
     config_file: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--config-file", "-c", help="Path to a JSON config file."),
     ] = None,
 ) -> None:
@@ -189,7 +192,7 @@ def stats(
 def list_runs_cmd(
     workspace: Annotated[Path, typer.Option("--workspace", "-w")],
     limit: Annotated[int, typer.Option("--limit", "-n")] = 20,
-    status: Annotated[Optional[str], typer.Option("--status", "-s")] = None,
+    status: Annotated[str | None, typer.Option("--status", "-s")] = None,
 ) -> None:
     """List the most recent N runs from the database."""
     paths = WorkspacePaths(workspace=str(workspace))
@@ -234,7 +237,7 @@ def rename(
     base_name: Annotated[str, typer.Option("--base-name", help="Output file prefix.")],
     mapping_json: Annotated[
         Path,
-        typer.Option("--mapping", help="JSON: {\"SPEAKER_00\": \"Name\", ...}"),
+        typer.Option("--mapping", help='JSON: {"SPEAKER_00": "Name", ...}'),
     ],
 ) -> None:
     """Replace SPEAKER_XX labels with real names across all outputs of a run."""
@@ -252,7 +255,7 @@ def rename(
 def clean(
     workspace: Annotated[Path, typer.Option("--workspace", "-w")],
     pattern: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--pattern", "-p", help="Substring to match in filenames."),
     ] = None,
     all_outputs: Annotated[
@@ -263,7 +266,7 @@ def clean(
         ),
     ] = False,
     confirm: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--confirm", help="Textual confirmation."),
     ] = None,
     include_diar_cache: Annotated[bool, typer.Option("--include-diar-cache")] = False,
@@ -274,16 +277,12 @@ def clean(
 
     if all_outputs:
         if confirm != "YES DELETE ALL":
-            console.print(
-                "[red]To delete everything, pass:[/red] --confirm='YES DELETE ALL'"
-            )
+            console.print("[red]To delete everything, pass:[/red] --confirm='YES DELETE ALL'")
             raise typer.Exit(1)
         n = delete_all_outputs(paths, confirm=confirm)
         console.print(f"[green]{n} file(s) deleted[/green]")
     elif pattern:
-        n = delete_outputs_for(
-            paths, pattern=pattern, include_diar_cache=include_diar_cache
-        )
+        n = delete_outputs_for(paths, pattern=pattern, include_diar_cache=include_diar_cache)
         console.print(f"[green]{n} file(s) deleted[/green]")
     else:
         console.print("[yellow]Pass --pattern or --all[/yellow]")

@@ -98,9 +98,7 @@ def generate_transcript_md(
             f"- **Diarization model:** {metadata.get('diarization_model', '-')} "
             f"(pyannote.audio {metadata.get('pyannote_version', '-')})"
         )
-        lines.append(
-            f"- **Speakers detected:** {len(speakers)} ({', '.join(speakers)})"
-        )
+        lines.append(f"- **Speakers detected:** {len(speakers)} ({', '.join(speakers)})")
 
     lines.extend(
         [
@@ -124,9 +122,7 @@ def generate_transcript_md(
     # ── Blocks
     for b in blocks:
         text = " ".join(t.strip() for t in b["texts"] if t.strip())
-        lines.append(
-            f"### {b['speaker']} · {format_hms(b['start'])} → {format_hms(b['end'])}"
-        )
+        lines.append(f"### {b['speaker']} · {format_hms(b['start'])} → {format_hms(b['end'])}")
         lines.append("")
         lines.append(text)
         lines.append("")

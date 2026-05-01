@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from speakerscribe.config import SPK_NO_OVERLAP
 from speakerscribe.diarization import assign_speaker_to_segment
 
@@ -28,7 +27,7 @@ class TestAssignSpeakerToSegment:
 
     def test_partial_overlap_max_wins(self):
         turns = [
-            {"start": 0, "end": 8, "speaker": "A"},   # 8s overlap with [0,10]
+            {"start": 0, "end": 8, "speaker": "A"},  # 8s overlap with [0,10]
             {"start": 8, "end": 12, "speaker": "B"},  # 2s overlap with [0,10]
         ]
         spk, ov = assign_speaker_to_segment(0, 10, turns)
@@ -69,9 +68,9 @@ class TestAssignSpeakerToSegment:
         "seg_start,seg_end,expected_spk,expected_ov",
         [
             (0, 5, "A", 5.0),
-            (3, 8, "A", 5.0),   # full overlap with A only
+            (3, 8, "A", 5.0),  # full overlap with A only
             (8, 12, "B", 4.0),  # full overlap with B only
-            (5, 8, "A", 3.0),   # only A in this range
+            (5, 8, "A", 3.0),  # only A in this range
         ],
     )
     def test_parametrized(self, seg_start, seg_end, expected_spk, expected_ov):

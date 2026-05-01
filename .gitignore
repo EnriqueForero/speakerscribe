@@ -1,0 +1,85 @@
+# ════════════════════════════════════════════════════════════════════
+# .gitignore — speakerscribe
+# Generado automáticamente por el notebook de publicación.
+# PRINCIPIO: solo va a git el CÓDIGO.
+# ════════════════════════════════════════════════════════════════════
+
+
+# ── Python ────────────────────────────────────────────────────────────
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+
+
+# ── Datos y archivos binarios ─────────────────────────────────────────
+*.coverage
+*.csv
+*.gif
+*.ipynb
+*.jpeg
+*.jpg
+*.json
+*.parquet
+*.pdf
+*.png
+*.xls
+*.xlsx
+*.zip
+
+
+# ── Carpetas excluidas ────────────────────────────────────────────────
+.eggs/
+.git/
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+__pycache__/
+_audio_temp/
+_diar_cache/
+_logs/
+build/
+data/
+dist/
+env/
+mnt/
+speakerscribe.egg-info/
+splits/
+transcripts/
+venv/
+z. Backups/
+
+
+# ── Archivos específicos excluidos ────────────────────────────────────
+coverage.xml
+
+
+# ── Carpetas de trabajo personal ──────────────────────────────────────
+z. */
+z.*/
+
+
+# ── IDE ───────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+
+# ── Credenciales ──────────────────────────────────────────────────────
+.env
+.env.local
+secrets.json
+*_token.txt
+*.pem
+*.key
+
+
+# ── Excepciones (siempre incluir) ────────────────────────────────
+# Estas reglas DEBEN ser las últimas del archivo.
+# En .gitignore la última coincidencia gana; si una regla
+# de exclusión aparece después de una excepción, la anula.
+!speakerscribe_colab.ipynb

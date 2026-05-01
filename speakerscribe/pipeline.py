@@ -73,8 +73,7 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
     required_mb = max(config.disk_margin_min_mb, total_mb * config.disk_margin_factor)
     if free_mb < required_mb:
         raise RuntimeError(
-            f"Insufficient disk space: {free_mb:.0f} MB free, "
-            f"~{required_mb:.0f} MB required."
+            f"Insufficient disk space: {free_mb:.0f} MB free, ~{required_mb:.0f} MB required."
         )
     logger.info(f"   Disk: {free_mb:,.0f} MB free (~{required_mb:.0f} MB required)")
 
@@ -103,9 +102,7 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
                     f"for '{config.model}' (~{min_vram} GB) plus diarization.",
                     stacklevel=2,
                 )
-            logger.info(
-                f"   VRAM: {vram_avail_gb:.1f} GB free / {vram_total_gb:.1f} GB total"
-            )
+            logger.info(f"   VRAM: {vram_avail_gb:.1f} GB free / {vram_total_gb:.1f} GB total")
     except ImportError:
         logger.warning("torch not available — skipping GPU checks")
 
@@ -145,7 +142,7 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
 def process_one(
     media_path: Path,
     paths: WorkspacePaths,
-    model: "WhisperModel",
+    model: WhisperModel,
     config: TranscriptionConfig,
 ) -> dict[str, Any]:
     """Run the full pipeline for a single media file.
@@ -182,9 +179,7 @@ def process_one(
         if config.enable_runs_db:
             from speakerscribe.persistence import find_run_by_hash
 
-            existing = find_run_by_hash(
-                paths.db_path, file_hash, config.model, diar_model
-            )
+            existing = find_run_by_hash(paths.db_path, file_hash, config.model, diar_model)
             if (
                 existing
                 and existing.get("status") == "ok"
@@ -373,15 +368,11 @@ def process_batch(
                                 "audio_file": item.name,
                                 "model": config.model,
                                 "diarization_model": (
-                                    config.diarization_model
-                                    if config.enable_diarization
-                                    else None
+                                    config.diarization_model if config.enable_diarization else None
                                 ),
                                 "processed_at": datetime.now(tz=timezone.utc).isoformat(),
                                 "config": (
-                                    config.model_dump()
-                                    if hasattr(config, "model_dump")
-                                    else {}
+                                    config.model_dump() if hasattr(config, "model_dump") else {}
                                 ),
                             },
                             file_hash=file_hash,

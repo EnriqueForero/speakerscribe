@@ -239,8 +239,7 @@ def evaluate_transcription_quality(metadata: dict[str, Any]) -> QualityReport:
                         severity=Severity.WARNING,
                         code="SPEAKER_DOMINANCE",
                         message=(
-                            f"One speaker dominates {max_pct:.0%} of segments — "
-                            f"poor diarization"
+                            f"One speaker dominates {max_pct:.0%} of segments — poor diarization"
                         ),
                         context={"max_pct": max_pct, "n_speakers": n_spk},
                     )
@@ -325,9 +324,7 @@ def evaluate_transcription_quality(metadata: dict[str, Any]) -> QualityReport:
                         )
                     )
 
-    quality_ok = not any(
-        f.severity in (Severity.WARNING, Severity.CRITICAL) for f in flags
-    )
+    quality_ok = not any(f.severity in (Severity.WARNING, Severity.CRITICAL) for f in flags)
 
     return QualityReport(
         quality_ok=quality_ok,

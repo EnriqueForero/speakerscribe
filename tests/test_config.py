@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-
 from speakerscribe.config import (
     MEDIA_EXTENSIONS,
     SPK_NO_DIARIZATION,

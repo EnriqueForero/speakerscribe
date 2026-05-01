@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from faster_whisper import WhisperModel
 
 
-def load_whisper_model(config: TranscriptionConfig) -> "WhisperModel":
+def load_whisper_model(config: TranscriptionConfig) -> WhisperModel:
     """Load a faster-whisper model on GPU (float16) or CPU (int8).
 
     Approximate VRAM usage on NVIDIA T4:
@@ -58,7 +58,7 @@ def load_whisper_model(config: TranscriptionConfig) -> "WhisperModel":
     return model
 
 
-def release_whisper_model(model: "WhisperModel | None" = None) -> None:
+def release_whisper_model(model: WhisperModel | None = None) -> None:
     """Release a Whisper model and clear the CUDA cache.
 
     Args:
@@ -85,7 +85,7 @@ def _config_to_dict(config: TranscriptionConfig) -> dict[str, Any]:
 
 
 def transcribe_streaming(
-    model: "WhisperModel",
+    model: WhisperModel,
     audio_path: Path,
     output_txt: Path,
     output_srt: Path,
@@ -153,9 +153,10 @@ def transcribe_streaming(
 
     output_txt.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_txt.open("w", encoding="utf-8") as f_txt, output_srt.open(
-        "w", encoding="utf-8"
-    ) as f_srt:
+    with (
+        output_txt.open("w", encoding="utf-8") as f_txt,
+        output_srt.open("w", encoding="utf-8") as f_srt,
+    ):
         for segment in segments_iter:
             counter += 1
             text = segment.text.strip()
@@ -165,7 +166,9 @@ def transcribe_streaming(
             # Speaker assignment
             if has_diar:
                 speaker, overlap = assign_speaker_to_segment(
-                    segment.start, segment.end, diar_turns  # type: ignore[arg-type]
+                    segment.start,
+                    segment.end,
+                    diar_turns,  # type: ignore[arg-type]
                 )
                 speaker_counts[speaker] += 1
                 label = f"[{speaker}] "
@@ -179,8 +182,7 @@ def transcribe_streaming(
             # SRT
             f_srt.write(f"{counter}\n")
             f_srt.write(
-                f"{format_srt_timestamp(segment.start)} --> "
-                f"{format_srt_timestamp(segment.end)}\n"
+                f"{format_srt_timestamp(segment.start)} --> {format_srt_timestamp(segment.end)}\n"
             )
             f_srt.write(f"{label}{text}\n\n")
 
@@ -212,10 +214,7 @@ def transcribe_streaming(
 
             if counter % 50 == 0:
                 progress = (segment.end / info.duration) * 100
-                logger.info(
-                    f"   {counter} segments | {total_words:,} words | "
-                    f"{progress:.1f}%"
-                )
+                logger.info(f"   {counter} segments | {total_words:,} words | {progress:.1f}%")
 
             if counter % 100 == 0:
                 f_txt.flush()
@@ -275,8 +274,7 @@ def transcribe_streaming(
         summary = " | ".join(f"{k}: {v}" for k, v in sorted(speaker_counts.items()))
         logger.info(f"   Segment distribution: {summary}")
     logger.success(
-        f"{counter} segments | {total_words:,} words | "
-        f"{elapsed / 60:.1f} min | RTF={rtf:.1f}x"
+        f"{counter} segments | {total_words:,} words | {elapsed / 60:.1f} min | RTF={rtf:.1f}x"
     )
     return metadata
 
