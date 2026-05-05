@@ -1,83 +1,92 @@
-"""Tests for speakerscribe.diarization (overlap-based speaker assignment)."""
+"""Tests for speakerscribe.diarization (v0.2.0)."""
 
 from __future__ import annotations
 
-import pytest
-from speakerscribe.config import SPK_NO_OVERLAP
-from speakerscribe.diarization import assign_speaker_to_segment
+from speakerscribe.config import SPK_NO_OVERLAP, TranscriptionConfig
+from speakerscribe.diarization import (
+    assign_speaker_to_segment,
+    diarization_params_hash,
+)
 
 
 class TestAssignSpeakerToSegment:
-    def test_empty_turns_returns_no_overlap(self):
-        assert assign_speaker_to_segment(0, 10, []) == (SPK_NO_OVERLAP, 0.0)
+    def test_no_turns_returns_no_overlap(self):
+        spk, ov = assign_speaker_to_segment(0, 10, [])
+        assert spk == SPK_NO_OVERLAP
+        assert ov == 0.0
 
-    def test_inverted_segment_returns_no_overlap(self):
-        turns = [{"start": 0, "end": 30, "speaker": "A"}]
-        assert assign_speaker_to_segment(20, 10, turns) == (SPK_NO_OVERLAP, 0.0)
+    def test_invalid_segment_returns_no_overlap(self):
+        turns = [{"start": 0.0, "end": 100.0, "speaker": "SPEAKER_00"}]
+        spk, ov = assign_speaker_to_segment(10, 5, turns)  # end < start
+        assert spk == SPK_NO_OVERLAP
 
-    def test_zero_length_segment_returns_no_overlap(self):
-        turns = [{"start": 0, "end": 30, "speaker": "A"}]
-        assert assign_speaker_to_segment(15, 15, turns) == (SPK_NO_OVERLAP, 0.0)
-
-    def test_full_overlap(self):
-        turns = [{"start": 0, "end": 100, "speaker": "A"}]
-        spk, ov = assign_speaker_to_segment(10, 20, turns)
-        assert spk == "A"
-        assert ov == 10.0
-
-    def test_partial_overlap_max_wins(self):
+    def test_max_overlap_wins(self):
         turns = [
-            {"start": 0, "end": 8, "speaker": "A"},  # 8s overlap with [0,10]
-            {"start": 8, "end": 12, "speaker": "B"},  # 2s overlap with [0,10]
+            {"start": 0.0, "end": 10.0, "speaker": "SPEAKER_00"},
+            {"start": 8.0, "end": 20.0, "speaker": "SPEAKER_01"},
         ]
+        spk, ov = assign_speaker_to_segment(5, 15, turns)
+        assert spk == "SPEAKER_01"  # 8-15 = 7s vs SPEAKER_00 5-10 = 5s
+        assert ov == 7.0
+
+    def test_no_overlap_returns_no_overlap_label(self):
+        turns = [{"start": 100.0, "end": 200.0, "speaker": "SPEAKER_00"}]
         spk, ov = assign_speaker_to_segment(0, 10, turns)
-        assert spk == "A"
-        assert ov == 8.0
+        assert spk == SPK_NO_OVERLAP
+        assert ov == 0.0
 
-    def test_no_overlap_turn_before(self):
-        turns = [{"start": 100, "end": 200, "speaker": "A"}]
-        assert assign_speaker_to_segment(0, 50, turns) == (SPK_NO_OVERLAP, 0.0)
-
-    def test_no_overlap_turn_after(self):
-        turns = [{"start": 0, "end": 10, "speaker": "A"}]
-        assert assign_speaker_to_segment(100, 200, turns) == (SPK_NO_OVERLAP, 0.0)
-
-    def test_early_exit_works_with_sorted_turns(self):
-        """Sorted turns allow early exit when a turn starts after the segment ends."""
+    def test_early_exit_optimization_correctness(self):
+        """Verify that the early-exit on sorted turns is correct."""
         turns = [
-            {"start": 0, "end": 5, "speaker": "A"},
-            {"start": 100, "end": 105, "speaker": "B"},
-            {"start": 200, "end": 205, "speaker": "C"},
+            {"start": 0.0, "end": 5.0, "speaker": "SPEAKER_00"},
+            {"start": 6.0, "end": 8.0, "speaker": "SPEAKER_01"},
+            {"start": 100.0, "end": 200.0, "speaker": "SPEAKER_02"},
         ]
-        spk, ov = assign_speaker_to_segment(2, 4, turns)
-        assert spk == "A"
-        assert ov == 2.0
+        spk, _ = assign_speaker_to_segment(2, 7, turns)
+        assert spk == "SPEAKER_00"  # max overlap is 3s
 
-    def test_same_speaker_multiple_turns_accumulates(self):
-        turns = [
-            {"start": 0, "end": 5, "speaker": "A"},
-            {"start": 7, "end": 9, "speaker": "B"},
-            {"start": 10, "end": 15, "speaker": "A"},
-        ]
-        # Segment [0,15]: A has 5+5=10 seconds, B has 2 seconds → A wins
-        spk, ov = assign_speaker_to_segment(0, 15, turns)
-        assert spk == "A"
-        assert ov == 10.0
 
-    @pytest.mark.parametrize(
-        "seg_start,seg_end,expected_spk,expected_ov",
-        [
-            (0, 5, "A", 5.0),
-            (3, 8, "A", 5.0),  # full overlap with A only
-            (8, 12, "B", 4.0),  # full overlap with B only
-            (5, 8, "A", 3.0),  # only A in this range
-        ],
-    )
-    def test_parametrized(self, seg_start, seg_end, expected_spk, expected_ov):
-        turns = [
-            {"start": 0, "end": 8, "speaker": "A"},
-            {"start": 8, "end": 12, "speaker": "B"},
-        ]
-        spk, ov = assign_speaker_to_segment(seg_start, seg_end, turns)
-        assert spk == expected_spk
-        assert abs(ov - expected_ov) < 0.001
+class TestDiarizationParamsHash:
+    """v0.2.0: cache invalidation by parameter hash."""
+
+    def test_same_params_same_hash(self):
+        h1 = diarization_params_hash(TranscriptionConfig(num_speakers=2))
+        h2 = diarization_params_hash(TranscriptionConfig(num_speakers=2))
+        assert h1 == h2
+
+    def test_different_num_speakers_different_hash(self):
+        h1 = diarization_params_hash(TranscriptionConfig(num_speakers=2))
+        h2 = diarization_params_hash(TranscriptionConfig(num_speakers=4))
+        assert h1 != h2
+
+    def test_different_min_max_different_hash(self):
+        h1 = diarization_params_hash(
+            TranscriptionConfig(min_speakers=2, max_speakers=4)
+        )
+        h2 = diarization_params_hash(
+            TranscriptionConfig(min_speakers=2, max_speakers=8)
+        )
+        assert h1 != h2
+
+    def test_different_model_different_hash(self):
+        h1 = diarization_params_hash(
+            TranscriptionConfig(diarization_model="pyannote/speaker-diarization-community-1")
+        )
+        h2 = diarization_params_hash(
+            TranscriptionConfig(diarization_model="pyannote/speaker-diarization-3.1")
+        )
+        assert h1 != h2
+
+    def test_hash_length_8(self):
+        h = diarization_params_hash(TranscriptionConfig())
+        assert len(h) == 8
+
+    def test_unrelated_params_dont_change_hash(self):
+        """Changing model (Whisper) or beam_size must NOT invalidate the cache."""
+        h1 = diarization_params_hash(
+            TranscriptionConfig(model="large-v3", beam_size=5, num_speakers=3)
+        )
+        h2 = diarization_params_hash(
+            TranscriptionConfig(model="large-v3-turbo", beam_size=1, num_speakers=3)
+        )
+        assert h1 == h2

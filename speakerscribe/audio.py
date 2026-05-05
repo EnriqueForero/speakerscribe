@@ -1,14 +1,50 @@
-"""Audio extraction with ffmpeg + time formatting helpers + file hashing."""
+"""Audio extraction with ffmpeg + duration probe + long-audio splitting + helpers.
+
+Public API:
+    extract_audio_wav        — Extract 16 kHz mono WAV from any media file.
+    get_audio_duration_seconds — Probe duration via ffprobe (no decoding).
+    split_long_audio         — Split a long WAV into overlapping chunks.
+    calculate_file_hash      — SHA-256 streaming hash (low memory).
+    format_srt_timestamp     — Seconds to SRT 'HH:MM:SS,mmm' format.
+    format_hms               — Seconds to 'HH:MM:SS' for human reading.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
+import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
 from speakerscribe.logging_config import logger
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    """A chunk of a longer audio file produced by `split_long_audio`.
+
+    Attributes:
+        path: Path to the chunk WAV file.
+        index: Zero-based chunk index.
+        start_s: Start time of the chunk in the ORIGINAL audio (seconds).
+        end_s: End time of the chunk in the ORIGINAL audio (seconds).
+        is_last: True when this is the final chunk (no trailing overlap to discard).
+    """
+
+    path: Path
+    index: int
+    start_s: float
+    end_s: float
+    is_last: bool
+
+    @property
+    def duration_s(self) -> float:
+        """Chunk duration in seconds."""
+        return self.end_s - self.start_s
 
 
 def extract_audio_wav(
@@ -73,6 +109,162 @@ def extract_audio_wav(
     size_mb = output_file.stat().st_size / 1e6
     logger.success(f"Audio extracted in {time.time() - t0:.1f}s ({size_mb:.1f} MB)")
     return output_file
+
+
+def get_audio_duration_seconds(path: Path) -> float:
+    """Probe a media file's duration in seconds using ffprobe.
+
+    No decoding, no full-file read — uses the container metadata. Works on
+    any format supported by ffmpeg (WAV, MP3, MP4, MKV, M4A, FLAC, ...).
+
+    Args:
+        path: Path to the media file.
+
+    Returns:
+        Duration in seconds. Returns 0.0 if the file has no measurable duration.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        RuntimeError: If ffprobe is not installed or fails.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if shutil.which("ffprobe") is None:
+        raise RuntimeError("ffprobe not found in PATH. Install ffmpeg (which bundles ffprobe).")
+
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {res.stderr.strip()}")
+    try:
+        data = json.loads(res.stdout)
+        duration = float(data.get("format", {}).get("duration", 0.0))
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        raise RuntimeError(f"Could not parse ffprobe output: {e}") from e
+    return duration
+
+
+def split_long_audio(
+    input_wav: Path,
+    output_dir: Path,
+    chunk_duration_s: int = 1800,
+    overlap_s: int = 5,
+    sample_rate: int = 16_000,
+) -> list[AudioChunk]:
+    """Split a long WAV file into overlapping fixed-duration chunks.
+
+    Strategy:
+        Chunk N covers [N*step, N*step + chunk_duration_s] where
+        step = chunk_duration_s - overlap_s. Consecutive chunks share `overlap_s`
+        seconds. Whisper transcribes each chunk independently; the consumer is
+        expected to drop segments that fall in the trailing overlap of every
+        chunk except the last (handled by `is_last`). This guarantees no word
+        is split across chunk boundaries while avoiding duplicate output.
+
+    Diarization is NOT chunked: it must run on the full original audio
+    (pyannote.audio handles long audio with its own sliding window).
+
+    Idempotent: if the chunks already exist with the expected file sizes,
+    they are reused without re-running ffmpeg.
+
+    Args:
+        input_wav: Source WAV file (typically already extracted to 16 kHz mono).
+        output_dir: Directory where chunk WAVs are written.
+        chunk_duration_s: Target chunk duration in seconds. Default 1800 (30 min).
+        overlap_s: Overlap between consecutive chunks in seconds. Default 5.
+        sample_rate: Sampling rate of the chunk WAVs. Default 16000.
+
+    Returns:
+        List of `AudioChunk` instances sorted by chunk index. If the audio is
+        shorter than `chunk_duration_s`, returns a single chunk pointing to
+        the original file (no splitting performed).
+
+    Raises:
+        FileNotFoundError: If the input WAV does not exist.
+        RuntimeError: If ffmpeg fails for any chunk.
+        ValueError: If `chunk_duration_s <= overlap_s` (would cause infinite loop).
+    """
+    if not input_wav.exists():
+        raise FileNotFoundError(f"Input WAV not found: {input_wav}")
+    if chunk_duration_s <= overlap_s:
+        raise ValueError(
+            f"chunk_duration_s ({chunk_duration_s}) must be greater than overlap_s ({overlap_s})."
+        )
+
+    duration = get_audio_duration_seconds(input_wav)
+    if duration <= chunk_duration_s:
+        logger.info(
+            f"Audio duration ({duration / 60:.1f} min) <= chunk size "
+            f"({chunk_duration_s / 60:.1f} min); no splitting needed."
+        )
+        return [AudioChunk(path=input_wav, index=0, start_s=0.0, end_s=duration, is_last=True)]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    step = chunk_duration_s - overlap_s
+    starts: list[float] = []
+    s = 0.0
+    while s < duration:
+        starts.append(s)
+        s += step
+
+    chunks: list[AudioChunk] = []
+    logger.info(
+        f"Splitting {duration / 60:.1f} min into {len(starts)} chunks of "
+        f"{chunk_duration_s / 60:.1f} min (overlap {overlap_s}s)"
+    )
+    t0 = time.time()
+    for i, start_s in enumerate(starts):
+        end_s = min(start_s + chunk_duration_s, duration)
+        is_last = i == len(starts) - 1
+        chunk_path = output_dir / f"{input_wav.stem}_chunk{i:03d}.wav"
+
+        # Skip if already produced and non-empty
+        if chunk_path.exists() and chunk_path.stat().st_size > 1024:
+            logger.debug(f"Reusing existing chunk: {chunk_path.name}")
+            chunks.append(
+                AudioChunk(path=chunk_path, index=i, start_s=start_s, end_s=end_s, is_last=is_last)
+            )
+            continue
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{start_s:.3f}",
+            "-i",
+            str(input_wav),
+            "-t",
+            f"{end_s - start_s:.3f}",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "pcm_s16le",
+            str(chunk_path),
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed splitting chunk {i} (exit {res.returncode}):\n{res.stderr}"
+            )
+        chunks.append(
+            AudioChunk(path=chunk_path, index=i, start_s=start_s, end_s=end_s, is_last=is_last)
+        )
+
+    logger.success(f"{len(chunks)} chunks produced in {time.time() - t0:.1f}s")
+    return chunks
 
 
 def calculate_file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -149,8 +341,11 @@ def format_hms(seconds: float) -> str:
 
 
 __all__ = [
+    "AudioChunk",
     "calculate_file_hash",
     "extract_audio_wav",
     "format_hms",
     "format_srt_timestamp",
+    "get_audio_duration_seconds",
+    "split_long_audio",
 ]

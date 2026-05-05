@@ -1,11 +1,18 @@
 """Speaker diarization with pyannote.audio 4.x + overlap-based assignment.
 
 Pinned to pyannote.audio>=4.0,<5.0. Older versions (3.x) are not supported.
+
+Cache strategy:
+    The diarization output is cached to disk keyed by `(audio_stem, params_hash)`,
+    where `params_hash` is derived from the parameters that materially affect
+    the output (`diarization_model`, `num_speakers`, `min_speakers`, `max_speakers`).
+    Changing any of these invalidates the cache automatically.
 """
 
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import time
 from collections import defaultdict
@@ -13,6 +20,29 @@ from pathlib import Path
 
 from speakerscribe.config import SPK_NO_OVERLAP, TranscriptionConfig
 from speakerscribe.logging_config import logger
+
+
+def diarization_params_hash(config: TranscriptionConfig) -> str:
+    """Compute a short hash of the diarization parameters that affect the output.
+
+    Used to key the diarization cache: changes in any of these parameters
+    invalidate the cache so we never accidentally reuse stale results when
+    the user tweaks `num_speakers` or switches diarization models.
+
+    Args:
+        config: TranscriptionConfig instance.
+
+    Returns:
+        Hex string of length 8.
+    """
+    payload = {
+        "model": config.diarization_model,
+        "num_speakers": config.num_speakers,
+        "min_speakers": config.min_speakers,
+        "max_speakers": config.max_speakers,
+    }
+    serialized = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(serialized, usedforsecurity=False).hexdigest()[:8]
 
 
 def diarize_audio(
@@ -28,12 +58,15 @@ def diarize_audio(
         3. RELEASE the pipeline before returning so VRAM is free for Whisper.
         4. Optionally cache the result as JSON for future re-runs.
 
+    Cache validation:
+        The cache file's params_hash is compared against the current config.
+        If they differ, the cache is ignored and diarization is re-run.
+
     Args:
         audio_path: 16 kHz mono WAV file.
         config: TranscriptionConfig with hf_token and num/min/max_speakers.
-        cache_path: If set and the file exists, results are loaded from cache
-            (diarization is skipped). If set and the file does not exist,
-            results are written there after a successful run.
+        cache_path: If set, results are loaded from cache when available with
+            matching params_hash, and saved there after a successful run.
 
     Returns:
         List of turn dicts sorted ascending by start:
@@ -43,13 +76,28 @@ def diarize_audio(
         RuntimeError: If the HuggingFace token is missing/invalid, the user
             has not accepted the model terms, or the model fails to load.
     """
-    # ── Cache hit
+    expected_hash = diarization_params_hash(config)
+
+    # ── Cache hit (only if params_hash matches) ────────────────────
     if cache_path and cache_path.exists():
-        with cache_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-        turns: list[dict] = data.get("turns", data)
-        logger.info(f"Diarization loaded from cache: {len(turns)} turns ({cache_path.name})")
-        return turns
+        try:
+            with cache_path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            cached_hash = data.get("params_hash")
+            if cached_hash == expected_hash:
+                turns: list[dict] = data.get("turns", [])
+                logger.info(
+                    f"Diarization loaded from cache: {len(turns)} turns "
+                    f"({cache_path.name}, params_hash={cached_hash})"
+                )
+                return turns
+            else:
+                logger.info(
+                    f"Diarization cache invalidated: params changed "
+                    f"({cached_hash} -> {expected_hash})"
+                )
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Could not read diarization cache ({e}); recomputing.")
 
     logger.info(f"Diarizing: {audio_path.name}")
     t0 = time.time()
@@ -154,6 +202,12 @@ def diarize_audio(
                 {
                     "audio_file": audio_path.name,
                     "model": config.diarization_model,
+                    "params_hash": expected_hash,
+                    "params": {
+                        "num_speakers": config.num_speakers,
+                        "min_speakers": config.min_speakers,
+                        "max_speakers": config.max_speakers,
+                    },
                     "n_speakers": len(unique_speakers),
                     "turns": turns,
                     "elapsed_seconds": round(elapsed, 2),
@@ -228,4 +282,8 @@ def assign_speaker_to_segment(
     return (speaker, round(overlap, 3))
 
 
-__all__ = ["assign_speaker_to_segment", "diarize_audio"]
+__all__ = [
+    "assign_speaker_to_segment",
+    "diarization_params_hash",
+    "diarize_audio",
+]

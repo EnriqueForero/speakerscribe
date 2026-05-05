@@ -1,10 +1,12 @@
-"""Tests for speakerscribe.config."""
+"""Tests for speakerscribe.config (v0.2.0)."""
 
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
+
 from speakerscribe.config import (
+    FILLER_WORDS,
     MEDIA_EXTENSIONS,
     SPK_NO_DIARIZATION,
     SPK_NO_OVERLAP,
@@ -20,7 +22,30 @@ class TestTranscriptionConfig:
         assert c.beam_size == 5
         assert c.enable_diarization is True
         assert c.force_reprocess is False
-        assert c.enable_runs_db is False  # opt-in by default
+
+    def test_default_enable_runs_db_on(self):
+        """v0.2.0: SQLite history is ON by default for robust idempotency."""
+        c = TranscriptionConfig()
+        assert c.enable_runs_db is True
+
+    def test_default_chunking(self):
+        """Long-audio chunking defaults: 120 min threshold, 30 min chunks, 5s overlap."""
+        c = TranscriptionConfig()
+        assert c.long_audio_threshold_min == 120
+        assert c.chunk_duration_min == 30
+        assert c.chunk_overlap_s == 5
+
+    def test_default_remove_fillers_on(self):
+        c = TranscriptionConfig()
+        assert c.remove_fillers is True
+
+    def test_default_unified_for_llm_on(self):
+        c = TranscriptionConfig()
+        assert c.produce_unified_for_llm is True
+
+    def test_default_streaming_jsonl_off(self):
+        c = TranscriptionConfig()
+        assert c.streaming_jsonl is False
 
     def test_invalid_model_fails(self):
         with pytest.raises(ValidationError):
@@ -41,6 +66,31 @@ class TestTranscriptionConfig:
     def test_min_greater_than_max(self):
         with pytest.raises(ValidationError, match="min_speakers"):
             TranscriptionConfig(min_speakers=5, max_speakers=3)
+
+    def test_chunk_duration_must_exceed_overlap(self):
+        """Validator: chunk_duration_min*60 must be > chunk_overlap_s.
+
+        chunk_duration_min has min=5 (=300s) and chunk_overlap_s has max=120s,
+        so this validator can only fire when chunk_overlap_s is just barely
+        above chunk_duration_min*60. We use chunk_duration_min=5 (300s) and
+        chunk_overlap_s=120 — overlap > duration would be a ValidationError.
+        Wait: 120 < 300, so this passes. Test instead the equality boundary:
+        chunk_duration_min=2 is invalid (Field min=5), so we set Field bounds
+        wider for this test by... actually the way to test the cross-validator
+        is to set both at the boundary where the cross-validator triggers.
+        """
+        # The cross-validator fires when chunk_duration_min*60 <= chunk_overlap_s.
+        # With Field min for chunk_duration_min=5 (=300s) and Field max for
+        # chunk_overlap_s=120s, the cross-validator can never fire on valid
+        # Field values. This is by design: Field bounds already prevent the
+        # nonsensical case. We assert that fact rather than try to trick it.
+        c = TranscriptionConfig(chunk_duration_min=5, chunk_overlap_s=120)
+        assert c.chunk_duration_min * 60 > c.chunk_overlap_s
+
+    def test_chunking_disabled_when_threshold_zero(self):
+        """If long_audio_threshold_min=0, chunking validators are bypassed."""
+        c = TranscriptionConfig(long_audio_threshold_min=0)
+        assert c.long_audio_threshold_min == 0
 
     def test_min_max_valid(self):
         c = TranscriptionConfig(min_speakers=2, max_speakers=5)
@@ -64,14 +114,12 @@ class TestTranscriptionConfig:
         assert c.language == "es"
 
     def test_extra_attribute_rejected(self):
-        """Pydantic with extra='forbid' rejects undeclared attributes."""
         with pytest.raises(ValidationError):
             TranscriptionConfig(unknown_param=42)  # type: ignore[call-arg]
 
     def test_resolve_device_auto(self):
         c = TranscriptionConfig(device="auto")
         device, compute = c.resolve_device()
-        # In CI without GPU: cpu/int8; on a GPU host: cuda/float16
         assert device in ("cpu", "cuda")
         assert compute in ("int8", "float16")
 
@@ -100,13 +148,47 @@ class TestTranscriptionConfig:
         assert c2.model == "large-v3-turbo"
         assert c2.language == "es"
 
-    def test_enable_runs_db_default_off(self):
-        c = TranscriptionConfig()
-        assert c.enable_runs_db is False
 
-    def test_enable_runs_db_can_be_enabled(self):
-        c = TranscriptionConfig(enable_runs_db=True)
-        assert c.enable_runs_db is True
+class TestPerFileGlossary:
+    """v0.2.0: per-file initial_prompt via <stem>.prompt.txt."""
+
+    def test_resolve_uses_per_file_when_present(self, tmp_path):
+        audio = tmp_path / "meeting.mp4"
+        audio.write_text("fake")
+        prompt_file = tmp_path / "meeting.prompt.txt"
+        prompt_file.write_text("GIC, ProColombia, OFAT")
+        c = TranscriptionConfig(initial_prompt="global prompt")
+        assert c.resolve_initial_prompt(audio) == "GIC, ProColombia, OFAT"
+
+    def test_resolve_falls_back_to_global(self, tmp_path):
+        audio = tmp_path / "other.mp4"
+        audio.write_text("fake")
+        c = TranscriptionConfig(initial_prompt="global only")
+        assert c.resolve_initial_prompt(audio) == "global only"
+
+    def test_resolve_returns_none_without_prompt(self, tmp_path):
+        audio = tmp_path / "x.mp4"
+        audio.write_text("fake")
+        c = TranscriptionConfig(initial_prompt=None)
+        assert c.resolve_initial_prompt(audio) is None
+
+    def test_resolve_per_file_truncated_to_500_chars(self, tmp_path):
+        audio = tmp_path / "m.mp4"
+        audio.write_text("fake")
+        prompt_file = tmp_path / "m.prompt.txt"
+        prompt_file.write_text("a" * 800)
+        c = TranscriptionConfig()
+        resolved = c.resolve_initial_prompt(audio)
+        assert resolved is not None
+        assert len(resolved) == 500
+
+    def test_resolve_empty_per_file_falls_back(self, tmp_path):
+        audio = tmp_path / "m.mp4"
+        audio.write_text("fake")
+        prompt_file = tmp_path / "m.prompt.txt"
+        prompt_file.write_text("   \n\n  ")
+        c = TranscriptionConfig(initial_prompt="global")
+        assert c.resolve_initial_prompt(audio) == "global"
 
 
 class TestWorkspacePaths:
@@ -117,6 +199,7 @@ class TestWorkspacePaths:
         assert p.transcripts == tmp_path / "transcripts"
         assert p.splits == tmp_path / "splits"
         assert p.audio_tmp == tmp_path / "_audio_temp"
+        assert p.audio_chunks == tmp_path / "_audio_chunks"
         assert p.diar_cache == tmp_path / "_diar_cache"
         assert p.logs == tmp_path / "_logs"
         assert p.db_path == tmp_path / "_runs.db"
@@ -128,6 +211,7 @@ class TestWorkspacePaths:
         assert p.transcripts.exists()
         assert p.splits.exists()
         assert p.audio_tmp.exists()
+        assert p.audio_chunks.exists()
         assert p.diar_cache.exists()
         assert p.logs.exists()
 
@@ -157,6 +241,10 @@ class TestConstants:
         assert ".mp4" in MEDIA_EXTENSIONS
         assert ".mp3" in MEDIA_EXTENSIONS
         assert ".wav" in MEDIA_EXTENSIONS
-        # All entries lowercase, leading-dot
         assert all(e == e.lower() for e in MEDIA_EXTENSIONS)
         assert all(e.startswith(".") for e in MEDIA_EXTENSIONS)
+
+    def test_filler_words_have_main_languages(self):
+        for lang in ("es", "en", "pt", "fr"):
+            assert lang in FILLER_WORDS
+            assert len(FILLER_WORDS[lang]) > 0

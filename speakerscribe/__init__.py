@@ -12,14 +12,14 @@ Quickstart:
 
 Modules:
     config       — TranscriptionConfig + WorkspacePaths (Pydantic v2)
-    audio        — WAV extraction with ffmpeg + time and hashing helpers
+    audio        — WAV extraction, duration probe, long-audio splitting, hashing
     diarization  — pyannote.audio 4.x + overlap-based speaker assignment
-    transcription— faster-whisper streaming + per-segment speaker labeling
-    output       — Markdown transcript generation + word-aware splits
+    transcription— faster-whisper streaming + chunked transcription
+    output       — Markdown transcript + word-aware splits + filler filter
     quality      — Heuristic post-transcription quality checker
     pipeline     — Orchestration: process_one + process_batch
     maintenance  — Helpers for cleaning, inspecting, renaming speakers
-    persistence  — Optional SQLite history of runs (idempotency by file hash)
+    persistence  — SQLite history of runs (idempotency by file hash)
     logging_config — loguru setup (console + rotating file sinks)
 """
 
@@ -29,20 +29,31 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__: str = version("speakerscribe")
 except PackageNotFoundError:
-    __version__ = "0.1.0"
+    __version__ = "0.1.1"
 
 # ─── Public API ────────────────────────────────────────────────────
+from speakerscribe.audio import (
+    AudioChunk,
+    get_audio_duration_seconds,
+    split_long_audio,
+)
 from speakerscribe.config import (
+    FILLER_WORDS,
     SPK_NO_DIARIZATION,
     SPK_NO_OVERLAP,
     TranscriptionConfig,
     WorkspacePaths,
 )
+from speakerscribe.diarization import diarization_params_hash
 from speakerscribe.maintenance import (
     delete_all_outputs,
     delete_outputs_for,
     inspect_json,
     rename_speakers_in_outputs,
+)
+from speakerscribe.output import (
+    is_filler_only,
+    write_unified_for_llm,
 )
 from speakerscribe.pipeline import (
     preflight_check,
@@ -57,8 +68,10 @@ from speakerscribe.quality import (
 )
 
 __all__ = [
+    "FILLER_WORDS",
     "SPK_NO_DIARIZATION",
     "SPK_NO_OVERLAP",
+    "AudioChunk",
     "QualityFlag",
     "QualityReport",
     "Severity",
@@ -67,10 +80,15 @@ __all__ = [
     "__version__",
     "delete_all_outputs",
     "delete_outputs_for",
+    "diarization_params_hash",
     "evaluate_transcription_quality",
+    "get_audio_duration_seconds",
     "inspect_json",
+    "is_filler_only",
     "preflight_check",
     "process_batch",
     "process_one",
     "rename_speakers_in_outputs",
+    "split_long_audio",
+    "write_unified_for_llm",
 ]

@@ -1,12 +1,52 @@
-"""Transcript Markdown generation grouped by speaker turns + text splitting."""
+"""Transcript Markdown generation grouped by speaker turns + text splitting.
+
+New in 0.2:
+    - `remove_fillers` filters segments whose text is only filler words
+      (uh, um, eh, ehm, ...) for the detected language. The .json keeps
+      everything for traceability; this only affects the readable .transcript.md.
+    - `write_unified_for_llm` produces a single concatenated file convenient
+      for LLMs with large context windows.
+"""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from speakerscribe.audio import format_hms
-from speakerscribe.config import SPK_NO_DIARIZATION
+from speakerscribe.config import FILLER_WORDS, SPK_NO_DIARIZATION
 from speakerscribe.logging_config import logger
+
+# Punctuation stripped before checking against the filler set
+_PUNCT_STRIP_RE = re.compile(r"[\.\,\;\:\!\?\¿\¡\…\-\–\—\(\)\"'`]+$")
+_LEADING_PUNCT_RE = re.compile(r"^[\.\,\;\:\!\?\¿\¡\…\-\–\—\(\)\"'`]+")
+
+
+def is_filler_only(text: str, language: str | None) -> bool:
+    """Return True if `text` is composed entirely of filler tokens.
+
+    Comparison is case-insensitive and strips leading/trailing punctuation.
+    The filler list is language-specific (see `FILLER_WORDS` in config).
+    Languages without a defined filler set always return False.
+
+    Args:
+        text: Segment text to evaluate.
+        language: Two-letter language code (e.g. "es", "en"). None disables
+            the filter (returns False).
+
+    Returns:
+        True if the segment should be considered a pure filler.
+    """
+    if not text or not language:
+        return False
+    fillers = FILLER_WORDS.get(language)
+    if not fillers:
+        return False
+    cleaned = _LEADING_PUNCT_RE.sub("", text.strip().lower())
+    cleaned = _PUNCT_STRIP_RE.sub("", cleaned).strip()
+    if not cleaned:
+        return True
+    return cleaned in fillers
 
 
 def generate_transcript_md(
@@ -14,6 +54,8 @@ def generate_transcript_md(
     output_md: Path,
     metadata: dict,
     gap_max_s: float = 2.0,
+    *,
+    remove_fillers: bool = True,
 ) -> int:
     """Generate a `.transcript.md` file by grouping consecutive same-speaker segments.
 
@@ -31,6 +73,8 @@ def generate_transcript_md(
             speakers_summary, diarization_enabled, model, package_version, etc.
         gap_max_s: If two consecutive segments by the same speaker are more
             than N seconds apart, they are split into separate blocks.
+        remove_fillers: If True, segments whose text is only filler words for
+            the detected language are dropped from the readable output.
 
     Returns:
         Number of turn blocks written.
@@ -42,6 +86,19 @@ def generate_transcript_md(
         return 0
 
     diar_enabled = bool(metadata.get("diarization_enabled"))
+    language = metadata.get("language_detected")
+
+    # ── Filter fillers if requested
+    if remove_fillers:
+        before = len(segments)
+        segments = [s for s in segments if not is_filler_only(s.get("text", ""), language)]
+        n_dropped = before - len(segments)
+        if n_dropped:
+            logger.info(f"   Filtered {n_dropped} filler-only segments from .transcript.md")
+
+    if not segments:
+        output_md.write_text("# Empty transcript (all fillers)\n", encoding="utf-8")
+        return 0
 
     # ── Group consecutive segments by the same speaker
     blocks: list[dict] = []
@@ -108,6 +165,20 @@ def generate_transcript_md(
         ]
     )
 
+    if metadata.get("chunked"):
+        lines.append(
+            f"> Long-audio mode: this transcript was assembled from "
+            f"{metadata.get('n_chunks', 0)} overlapping chunks."
+        )
+        lines.append("")
+
+    if remove_fillers and language in FILLER_WORDS:
+        lines.append(
+            f"> Filler words for `{language}` removed from this readable view. "
+            f"The .json contains all original segments."
+        )
+        lines.append("")
+
     if diar_enabled:
         lines.extend(
             [
@@ -173,7 +244,6 @@ def split_text_by_words(
         has_speakers = any(ln.startswith("[SPEAKER_") for ln in lines)
 
     if not has_speakers:
-        # Pure word split
         words = text.split()
         n_files = (len(words) + max_words - 1) // max_words
         for i in range(n_files):
@@ -205,4 +275,46 @@ def split_text_by_words(
     return len(buffers)
 
 
-__all__ = ["generate_transcript_md", "split_text_by_words"]
+def write_unified_for_llm(
+    txt_file: Path,
+    output_dir: Path,
+) -> Path | None:
+    """Write a single unified transcript file convenient for LLMs with large context.
+
+    Modern LLMs (Claude, GPT-4, Gemini) accept >100k tokens. For audios up to
+    ~5h, a single concatenated file is more useful than the chunked splits
+    (one paste, one prompt).
+
+    The file content is the same as the source `.txt` (already includes
+    `[SPEAKER_XX]` labels when available). Naming convention:
+    `<txt_stem>_full_for_llm.txt`.
+
+    Args:
+        txt_file: Source .txt produced by `transcribe_streaming`.
+        output_dir: Destination directory (typically `paths.splits`).
+
+    Returns:
+        Path to the unified file, or None if the source is missing/empty.
+    """
+    if not txt_file.exists():
+        logger.warning(f"File not found: {txt_file}")
+        return None
+    text = txt_file.read_text(encoding="utf-8")
+    if not text.strip():
+        logger.warning(f"Empty file: {txt_file.name}")
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / f"{txt_file.stem}_full_for_llm.txt"
+    target.write_text(text, encoding="utf-8")
+    n_words = len(text.split())
+    logger.info(f"Unified for LLM: {target.name} ({n_words:,} words)")
+    return target
+
+
+__all__ = [
+    "generate_transcript_md",
+    "is_filler_only",
+    "split_text_by_words",
+    "write_unified_for_llm",
+]

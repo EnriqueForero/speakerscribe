@@ -14,8 +14,8 @@
 
 
 # ── Datos y archivos binarios ─────────────────────────────────────────
-*.coverage
 *.csv
+*.db
 *.gif
 *.ipynb
 *.jpeg
@@ -34,14 +34,17 @@
 .git/
 .ipynb_checkpoints/
 .pytest_cache/
+.ruff_cache/
 .venv/
 __pycache__/
+_audio_chunks/
 _audio_temp/
 _diar_cache/
 _logs/
 build/
 data/
 dist/
+entregables/
 env/
 mnt/
 speakerscribe.egg-info/
@@ -52,6 +55,8 @@ z. Backups/
 
 
 # ── Archivos específicos excluidos ────────────────────────────────────
+.coverage
+_runs.db
 coverage.xml
 
 
@@ -82,4 +87,4 @@ secrets.json
 # Estas reglas DEBEN ser las últimas del archivo.
 # En .gitignore la última coincidencia gana; si una regla
 # de exclusión aparece después de una excepción, la anula.
-!speakerscribe_colab.ipynb
+!notebooks/notebook_speakerscribe.ipynb

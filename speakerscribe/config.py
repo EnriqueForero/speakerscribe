@@ -65,6 +65,55 @@ MEDIA_EXTENSIONS: tuple[str, ...] = (
     ".webm",
 )
 
+# ─── Filler words by language ──────────────────────────────────────
+# Segments whose stripped text matches EXACTLY one of these (case-insensitive,
+# punctuation-stripped) are dropped from the readable .transcript.md when
+# `remove_fillers=True`. The original .json keeps everything for traceability.
+FILLER_WORDS: dict[str, frozenset[str]] = {
+    "es": frozenset(
+        {
+            "eh",
+            "ehm",
+            "em",
+            "mmm",
+            "mhm",
+            "ajá",
+            "aja",
+            "este",
+            "pues",
+            "o sea",
+            "como que",
+            "bueno",
+            "claro",
+            "sí",
+            "no",
+            "ok",
+            "vale",
+        }
+    ),
+    "en": frozenset(
+        {
+            "uh",
+            "um",
+            "uhm",
+            "ah",
+            "er",
+            "erm",
+            "hmm",
+            "mhm",
+            "yeah",
+            "right",
+            "ok",
+            "okay",
+            "you know",
+            "i mean",
+            "like",
+        }
+    ),
+    "pt": frozenset({"é", "tipo", "né", "então", "bom", "sabe", "ahn"}),
+    "fr": frozenset({"euh", "ben", "bah", "voilà", "quoi", "alors", "donc"}),
+}
+
 
 # ─── TranscriptionConfig ───────────────────────────────────────────
 class TranscriptionConfig(BaseModel):
@@ -81,6 +130,8 @@ class TranscriptionConfig(BaseModel):
         beam_size: 1=greedy (fastest), 5=balanced, 10=highest quality.
         language: None=auto-detect; "en", "es", "fr", etc. force a language.
         initial_prompt: Glossary string to bias decoding (proper nouns, jargon).
+            Per-file overrides: a file `<audio_stem>.prompt.txt` next to the
+            source media replaces this global prompt for that single file.
         use_vad: Enable Silero Voice Activity Detection (skip silences).
         vad_min_silence_ms: Silences >= N ms split segments.
         word_timestamps: Emit per-word timestamps. Slows decoding ~10-15 percent.
@@ -94,12 +145,28 @@ class TranscriptionConfig(BaseModel):
         gap_max_s_transcript: A gap of more than N seconds within a single
             speaker opens a new turn block in the transcript.
         generate_transcript_md: If False, skip Markdown transcript generation.
+        remove_fillers: If True, the readable .transcript.md drops segments
+            whose only content is filler words ("eh", "um", ...) for the
+            detected language. The .json and .srt keep ALL segments (audit).
         words_per_split: Soft cap of words per split file (for chunking large
             transcripts before downstream LLM processing).
+        produce_unified_for_llm: If True, additionally write a single
+            `<base>_full_for_llm.txt` with the entire transcript (no chunking),
+            convenient for LLMs with large context windows.
+        long_audio_threshold_min: Audios longer than this are split into chunks
+            for transcription. Set to 0 to disable splitting. Default 120 min.
+        chunk_duration_min: Target duration of each chunk in minutes. Only
+            applies when the audio exceeds `long_audio_threshold_min`.
+        chunk_overlap_s: Overlap between consecutive chunks in seconds. Reduces
+            risk of cutting words across boundaries.
         force_reprocess: If True, ignore existing outputs and re-run.
         evaluate_quality: If True, run heuristic quality checks post-run.
         enable_runs_db: If True, persist per-run metadata in a local SQLite
-            database under the workspace. Off by default.
+            database under the workspace. ON by default for robust idempotency
+            by file hash; the user usually doesn't need to interact with it.
+        streaming_jsonl: If True, additionally write each segment to
+            `<base>.segments.jsonl` as it is produced. Useful for very long
+            audios where loading the full .json into memory is undesirable.
         sample_rate: 16000 Hz is standard for both Whisper and pyannote.
         disk_margin_factor: Required free space = total_input_size_mb * factor.
         disk_margin_min_mb: Hard floor for required free space (MB).
@@ -137,12 +204,23 @@ class TranscriptionConfig(BaseModel):
     # ── Transcript output ──────────────────────────────────────────
     gap_max_s_transcript: Annotated[float, Field(ge=0.0, le=60.0)] = 2.0
     generate_transcript_md: bool = True
+    remove_fillers: bool = True
 
     # ── Output / processing ────────────────────────────────────────
     words_per_split: Annotated[int, Field(ge=100, le=10_000)] = 1950
+    produce_unified_for_llm: bool = True
     extract_temp_wav: bool = True
     delete_temp_wav: bool = True
     sample_rate: Annotated[int, Field(ge=8_000, le=48_000)] = 16_000
+
+    # ── Long-audio chunking ────────────────────────────────────────
+    long_audio_threshold_min: Annotated[int, Field(ge=0, le=600)] = 120
+    chunk_duration_min: Annotated[int, Field(ge=5, le=120)] = 30
+    chunk_overlap_s: Annotated[int, Field(ge=0, le=120)] = 5
+    delete_chunk_wavs: bool = True
+
+    # ── Streaming output ───────────────────────────────────────────
+    streaming_jsonl: bool = False
 
     # ── Idempotency ────────────────────────────────────────────────
     force_reprocess: bool = False
@@ -150,8 +228,8 @@ class TranscriptionConfig(BaseModel):
     # ── Quality checks ─────────────────────────────────────────────
     evaluate_quality: bool = True
 
-    # ── Persistence (opt-in) ───────────────────────────────────────
-    enable_runs_db: bool = False
+    # ── Persistence (ON by default for robust idempotency) ─────────
+    enable_runs_db: bool = True
 
     # ── Pre-flight ─────────────────────────────────────────────────
     disk_margin_factor: Annotated[float, Field(ge=0.1, le=10.0)] = 0.5
@@ -183,6 +261,18 @@ class TranscriptionConfig(BaseModel):
             raise ValueError(
                 f"min_speakers ({self.min_speakers}) > max_speakers ({self.max_speakers})"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_chunking(self) -> TranscriptionConfig:
+        """chunk_duration_min must be greater than chunk_overlap_s/60."""
+        if self.long_audio_threshold_min > 0:
+            chunk_s = self.chunk_duration_min * 60
+            if chunk_s <= self.chunk_overlap_s:
+                raise ValueError(
+                    f"chunk_duration_min ({self.chunk_duration_min} min = {chunk_s}s) "
+                    f"must be greater than chunk_overlap_s ({self.chunk_overlap_s}s)."
+                )
         return self
 
     def resolve_device(self) -> tuple[str, str]:
@@ -231,6 +321,32 @@ class TranscriptionConfig(BaseModel):
         # Env var fallback
         return os.environ.get("HF_TOKEN")
 
+    def resolve_initial_prompt(self, media_path: Path) -> str | None:
+        """Resolve the effective initial prompt for a given media file.
+
+        Lookup order:
+            1. A file `<media_stem>.prompt.txt` next to the source media.
+            2. The global `initial_prompt` from this config.
+            3. None.
+
+        Per-file prompts allow having a tailored glossary for each meeting
+        without re-configuring the pipeline between runs.
+
+        Args:
+            media_path: Path to the source media file.
+
+        Returns:
+            The effective prompt string, or None.
+        """
+        prompt_file = media_path.with_suffix(".prompt.txt")
+        if prompt_file.exists() and prompt_file.is_file():
+            content = prompt_file.read_text(encoding="utf-8").strip()
+            if content:
+                # Pydantic validates max_length=500 on construction; enforce
+                # the same limit here for per-file prompts.
+                return content[:500]
+        return self.initial_prompt
+
 
 # ─── WorkspacePaths ────────────────────────────────────────────────
 class WorkspacePaths(BaseModel):
@@ -244,9 +360,10 @@ class WorkspacePaths(BaseModel):
         transcripts/      — .txt, .srt, .json, .transcript.md outputs
         splits/           — chunked .txt outputs for downstream LLM use
         _audio_temp/      — temporary 16 kHz mono WAVs (auto-deleted by default)
+        _audio_chunks/    — chunked WAVs for long-audio splitting
         _diar_cache/      — cached pyannote diarization results
         _logs/            — rotating loguru log files
-        _runs.db          — optional SQLite history (only if enable_runs_db=True)
+        _runs.db          — SQLite history (created when enable_runs_db=True)
 
     Attributes:
         workspace: Root path of the project. Subdirectories are created on demand.
@@ -277,6 +394,10 @@ class WorkspacePaths(BaseModel):
         return self.base / "_audio_temp"
 
     @property
+    def audio_chunks(self) -> Path:
+        return self.base / "_audio_chunks"
+
+    @property
     def diar_cache(self) -> Path:
         return self.base / "_diar_cache"
 
@@ -295,6 +416,7 @@ class WorkspacePaths(BaseModel):
             self.transcripts,
             self.splits,
             self.audio_tmp,
+            self.audio_chunks,
             self.diar_cache,
             self.logs,
         ]:

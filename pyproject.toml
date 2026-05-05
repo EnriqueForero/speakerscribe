@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speakerscribe"
-version = "0.1.0"
+version = "0.1.1"
 description = "Speech-to-text with speaker diarization — Whisper + pyannote.audio, optimized for Google Colab Free Tier (T4 GPU)."
 readme = "README.md"
 license = {text = "MIT"}

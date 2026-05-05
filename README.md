@@ -27,7 +27,7 @@
 
 Open the companion notebook:
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EnriqueForero/speakerscribe/blob/main/speakerscribe_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/EnriqueForero/speakerscribe/blob/main/notebooks/notebook_speakerscribe.ipynb)
 
 The notebook handles everything: installation, Google Drive mounting, HF token setup, and batch processing.
 

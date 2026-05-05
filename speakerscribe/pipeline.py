@@ -1,4 +1,16 @@
-"""Pipeline orchestration: process_one, process_batch, preflight_check."""
+"""Pipeline orchestration: process_one, process_batch, preflight_check.
+
+Orchestrates the full pipeline:
+    1. Pre-flight environment validation
+    2. WAV extraction (ffmpeg)
+    3. Long-audio chunking (when applicable)
+    4. Diarization on the FULL audio (cached by params hash)
+    5. Streaming transcription (single-shot or chunked)
+    6. Markdown transcript generation (with optional filler filter)
+    7. Word-aware splits + unified-for-LLM file
+    8. Quality check (heuristic)
+    9. SQLite history (idempotency by file content hash)
+"""
 
 from __future__ import annotations
 
@@ -12,21 +24,29 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from speakerscribe.audio import (
+    AudioChunk,
     calculate_file_hash,
     extract_audio_wav,
+    get_audio_duration_seconds,
+    split_long_audio,
 )
 from speakerscribe.config import (
     MIN_VRAM_BY_MODEL,
     TranscriptionConfig,
     WorkspacePaths,
 )
-from speakerscribe.diarization import diarize_audio
+from speakerscribe.diarization import diarization_params_hash, diarize_audio
 from speakerscribe.logging_config import logger
-from speakerscribe.output import generate_transcript_md, split_text_by_words
+from speakerscribe.output import (
+    generate_transcript_md,
+    split_text_by_words,
+    write_unified_for_llm,
+)
 from speakerscribe.quality import evaluate_transcription_quality
 from speakerscribe.transcription import (
     load_whisper_model,
     release_whisper_model,
+    transcribe_chunked,
     transcribe_streaming,
 )
 
@@ -139,6 +159,73 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
     }
 
 
+def _maybe_extract_wav(
+    media_path: Path,
+    paths: WorkspacePaths,
+    config: TranscriptionConfig,
+    timings: dict[str, float],
+) -> tuple[Path, Path | None]:
+    """Extract WAV if configured, return (audio_for_model, wav_path_to_cleanup_or_None)."""
+    if config.extract_temp_wav:
+        t = time.time()
+        wav_path = paths.audio_tmp / f"{media_path.stem}.wav"
+        extract_audio_wav(media_path, wav_path, config.sample_rate)
+        timings["extract_wav_s"] = round(time.time() - t, 2)
+        return wav_path, wav_path
+    return media_path, None
+
+
+def _maybe_diarize(
+    audio_for_model: Path,
+    paths: WorkspacePaths,
+    config: TranscriptionConfig,
+    media_stem: str,
+    timings: dict[str, float],
+) -> list[dict] | None:
+    """Run diarization on the full audio (with cache invalidated by params hash)."""
+    if not config.enable_diarization:
+        return None
+    cache_path = paths.diar_cache / f"{media_stem}_{diarization_params_hash(config)}.diar.json"
+    t = time.time()
+    try:
+        turns = diarize_audio(audio_for_model, config, cache_path)
+        timings["diarization_s"] = round(time.time() - t, 2)
+        return turns
+    except RuntimeError as e:
+        logger.error(f"Diarization failed (known): {e}")
+        logger.error("Check: HF token, model terms, available VRAM")
+    except (ImportError, AttributeError) as e:
+        logger.error(f"Diarization failed (version mismatch): {e}")
+        logger.error("Verify pyannote.audio>=4.0 and restart the runtime after install")
+        traceback.print_exc()
+    except Exception as e:
+        logger.error(f"Diarization failed (uncategorized): {type(e).__name__}: {e}")
+        traceback.print_exc()
+    timings["diarization_s"] = round(time.time() - t, 2)
+    return None
+
+
+def _should_chunk_audio(audio_path: Path, config: TranscriptionConfig) -> tuple[bool, float]:
+    """Decide whether to chunk based on duration vs threshold."""
+    if config.long_audio_threshold_min <= 0:
+        return False, 0.0
+    duration_s = get_audio_duration_seconds(audio_path)
+    threshold_s = config.long_audio_threshold_min * 60
+    return duration_s > threshold_s, duration_s
+
+
+def _cleanup_chunks(chunks: list[AudioChunk], original_wav: Path) -> None:
+    """Delete chunk WAVs (but never the original full WAV)."""
+    for chunk in chunks:
+        if chunk.path == original_wav:
+            continue
+        if chunk.path.exists():
+            try:
+                chunk.path.unlink()
+            except OSError as e:
+                logger.warning(f"Could not delete chunk {chunk.path.name}: {e}")
+
+
 def process_one(
     media_path: Path,
     paths: WorkspacePaths,
@@ -148,11 +235,16 @@ def process_one(
     """Run the full pipeline for a single media file.
 
     Idempotency strategy:
-        - When `enable_runs_db=True`: skip if a previous run with the same
-          file hash + ASR model + diarization model is recorded with status
-          'ok' AND the JSON output still exists.
-        - When `enable_runs_db=False`: skip if the JSON output exists and
-          `force_reprocess` is False (filename-based, not content-based).
+        - When `enable_runs_db=True` (default): skip if a previous run with the
+          same file hash + ASR model + diarization model is recorded with
+          status 'ok' AND the JSON output still exists. This is robust to
+          renaming the source file or tweaking unrelated parameters.
+        - When `enable_runs_db=False`: skip if both the JSON and TXT outputs
+          exist and `force_reprocess` is False (filename-based; less robust).
+
+    Long audios (> `config.long_audio_threshold_min` minutes) are split into
+    overlapping chunks for transcription. Diarization always runs on the full
+    audio for speaker consistency.
 
     Args:
         media_path: Path to the source audio/video file.
@@ -161,14 +253,16 @@ def process_one(
         config: Pipeline configuration.
 
     Returns:
-        Dict with metadata + status: "ok" | "skipped".
+        Dict with metadata + status: "ok" | "skipped" | "error".
     """
     base_name = f"{media_path.stem}_{config.model}"
     output_txt = paths.transcripts / f"{base_name}.txt"
     output_srt = paths.transcripts / f"{base_name}.srt"
     output_json = paths.transcripts / f"{base_name}.json"
     output_md = paths.transcripts / f"{base_name}.transcript.md"
-    diar_cache_path = paths.diar_cache / f"{media_path.stem}.diar.json"
+    output_jsonl = (
+        paths.transcripts / f"{base_name}.segments.jsonl" if config.streaming_jsonl else None
+    )
 
     # Hash for content-based idempotency (only computed when DB is enabled)
     file_hash = calculate_file_hash(media_path) if config.enable_runs_db else ""
@@ -194,88 +288,122 @@ def process_one(
                     "audio_file": media_path.name,
                     "file_hash": file_hash,
                     "previous_run_id": existing.get("id"),
+                    "base_name": base_name,
                 }
-        # File-based fallback when DB is disabled
         elif output_json.exists() and output_txt.exists():
             logger.info(f"Outputs already exist for: {media_path.name} — skipping")
             return {
                 "status": "skipped",
                 "audio_file": media_path.name,
+                "base_name": base_name,
             }
     else:
         logger.info(f"Force re-process for: {media_path.name}")
 
+    # Per-stage telemetry
+    timings: dict[str, float] = {}
+    t_start = time.time()
+
     # 1. Extract audio to WAV
-    if config.extract_temp_wav:
-        wav_path = paths.audio_tmp / f"{media_path.stem}.wav"
-        extract_audio_wav(media_path, wav_path, config.sample_rate)
-        audio_for_model = wav_path
+    audio_for_model, wav_path = _maybe_extract_wav(media_path, paths, config, timings)
+
+    # 2. Diarization (BEFORE Whisper to free VRAM) — always on the FULL audio
+    diar_turns = _maybe_diarize(audio_for_model, paths, config, media_path.stem, timings)
+
+    # 3. Decide whether to chunk for transcription
+    should_chunk, duration_s = _should_chunk_audio(audio_for_model, config)
+    chunks: list[AudioChunk] = []
+
+    if should_chunk:
+        logger.info(
+            f"Long audio ({duration_s / 60:.1f} min > "
+            f"{config.long_audio_threshold_min} min threshold) — chunking for transcription"
+        )
+        t = time.time()
+        chunks = split_long_audio(
+            input_wav=audio_for_model,
+            output_dir=paths.audio_chunks,
+            chunk_duration_s=config.chunk_duration_min * 60,
+            overlap_s=config.chunk_overlap_s,
+            sample_rate=config.sample_rate,
+        )
+        timings["split_audio_s"] = round(time.time() - t, 2)
+
+    # 4. Transcribe — chunked or single-shot
+    if should_chunk:
+        metadata = transcribe_chunked(
+            model=model,
+            chunks=chunks,
+            output_txt=output_txt,
+            output_srt=output_srt,
+            output_json=output_json,
+            config=config,
+            diar_turns=diar_turns,
+            source_media=media_path,
+            output_jsonl=output_jsonl,
+        )
     else:
-        audio_for_model = media_path
-        wav_path = None
+        metadata = transcribe_streaming(
+            model=model,
+            audio_path=audio_for_model,
+            output_txt=output_txt,
+            output_srt=output_srt,
+            output_json=output_json,
+            config=config,
+            diar_turns=diar_turns,
+            source_media=media_path,
+            output_jsonl=output_jsonl,
+        )
 
-    # 2. Diarization (BEFORE Whisper to free VRAM)
-    diar_turns: list[dict] | None = None
-    if config.enable_diarization:
-        try:
-            diar_turns = diarize_audio(audio_for_model, config, diar_cache_path)
-        except RuntimeError as e:
-            logger.error(f"Diarization failed (known): {e}")
-            logger.error("Check: HF token, model terms, available VRAM")
-            diar_turns = None
-        except (ImportError, AttributeError) as e:
-            logger.error(f"Diarization failed (version mismatch): {e}")
-            logger.error("Verify pyannote.audio>=4.0 and restart the runtime after install")
-            traceback.print_exc()
-            diar_turns = None
-        except Exception as e:
-            logger.error(f"Diarization failed (uncategorized): {type(e).__name__}: {e}")
-            traceback.print_exc()
-            diar_turns = None
+    # Merge external timings into metadata (transcription already added its own)
+    metadata.setdefault("timings", {})
+    for k, v in timings.items():
+        metadata["timings"][k] = v
 
-    # 3. Transcribe (streaming)
-    metadata = transcribe_streaming(
-        model,
-        audio_for_model,
-        output_txt,
-        output_srt,
-        output_json,
-        config,
-        diar_turns,
-    )
-
-    # 4. Markdown transcript
+    # 5. Markdown transcript
     if config.generate_transcript_md and metadata.get("segments"):
+        t = time.time()
         generate_transcript_md(
             metadata["segments"],
             output_md,
             metadata,
             gap_max_s=config.gap_max_s_transcript,
+            remove_fillers=config.remove_fillers,
         )
+        metadata["timings"]["transcript_md_s"] = round(time.time() - t, 2)
 
-    # 5. Splits
+    # 6. Splits + unified-for-LLM
+    t = time.time()
     split_text_by_words(
         output_txt,
         paths.splits,
         config.words_per_split,
         has_speakers=metadata.get("diarization_enabled", False),
     )
+    if config.produce_unified_for_llm:
+        write_unified_for_llm(output_txt, paths.splits)
+    metadata["timings"]["splits_s"] = round(time.time() - t, 2)
 
-    # 6. Cleanup temp WAV
+    # 7. Cleanup temp WAV(s) and chunks
+    if config.delete_chunk_wavs and chunks:
+        _cleanup_chunks(chunks, audio_for_model)
+        logger.debug("Chunk WAVs deleted")
     if config.delete_temp_wav and wav_path and wav_path.exists():
         wav_path.unlink()
         logger.debug("Temporary WAV deleted")
 
-    # 7. Quality check
+    # 8. Quality check
     quality_report = None
     if config.evaluate_quality:
+        t = time.time()
         quality_report = evaluate_transcription_quality(metadata)
+        metadata["timings"]["quality_check_s"] = round(time.time() - t, 2)
         if quality_report.quality_ok:
             logger.success("Quality: OK")
         else:
             logger.warning(quality_report.summary())
 
-    # 8. Optional persistence
+    # 9. Optional persistence
     if config.enable_runs_db:
         from speakerscribe.persistence import register_run
 
@@ -293,6 +421,7 @@ def process_one(
             status="ok",
         )
 
+    metadata["timings"]["total_s"] = round(time.time() - t_start, 2)
     metadata["status"] = "ok"
     metadata["base_name"] = base_name
     if config.enable_runs_db:
@@ -356,7 +485,6 @@ def process_batch(
             except Exception as e:
                 logger.error(f"ERROR on {item.name}: {type(e).__name__}: {e}")
                 traceback.print_exc()
-                # Optionally log the error in DB
                 if config.enable_runs_db:
                     try:
                         from speakerscribe.persistence import register_run
