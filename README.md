@@ -17,9 +17,11 @@
 |--------|-------------|
 | `.txt` | Plain transcript with `[SPEAKER_XX]` labels per line |
 | `.srt` | Subtitle file with timestamps and speaker labels |
-| `.json` | Full structured metadata (segments, speakers, versions, RTF) |
+| `.json` | Full structured metadata (segments, speakers, versions, RTF, timings) |
 | `.transcript.md` | Readable Markdown grouped by speaker turns with a metadata header |
 | `_1.txt`, `_2.txt` … | Text chunks of ~1950 words for downstream LLM processing |
+| `_full_for_llm.txt` | Single-file full transcript for LLMs with large context windows |
+| `.segments.jsonl` | Per-segment streaming output (opt-in via `streaming_jsonl=True`) |
 
 ---
 
@@ -115,11 +117,23 @@ rename_speakers_in_outputs(
 # Process all audio files in a workspace
 speakerscribe process --workspace /path/to/project --model large-v3-turbo --language es
 
+# Enable debug logging
+speakerscribe --verbose process --workspace /path/to/project
+
+# Load config from a JSON file instead of CLI flags
+speakerscribe process --workspace /path/to/project --config-file config.json
+
 # Run a fast smoke test (small model, first file only)
 speakerscribe smoke-test --workspace /path/to/project
 
 # Inspect a transcription JSON file
 speakerscribe inspect /path/to/project/transcripts/interview.json
+
+# Show aggregate statistics from the runs database
+speakerscribe stats --workspace /path/to/project
+
+# List the most recent runs
+speakerscribe list-runs --workspace /path/to/project --limit 20
 
 # Rename speaker labels
 speakerscribe rename --workspace /path/to/project \
@@ -129,8 +143,11 @@ speakerscribe rename --workspace /path/to/project \
 # Delete outputs for a specific file (keep source audio)
 speakerscribe clean --workspace /path/to/project --pattern "interview"
 
+# Delete everything (requires explicit confirmation)
+speakerscribe clean --workspace /path/to/project --all --confirm "YES DELETE ALL"
+
 # Show version
-speakerscribe --version
+speakerscribe version
 ```
 
 ---
@@ -141,10 +158,12 @@ speakerscribe --version
 my_project/
 ├── data/                  ← place your .mp4 / .mp3 / .wav / .m4a files here
 ├── transcripts/           ← outputs: .txt, .srt, .json, .transcript.md
-├── splits/                ← chunked .txt files for LLM use
+├── splits/                ← chunked .txt files and _full_for_llm.txt for LLM use
 ├── _audio_temp/           ← temporary 16 kHz WAVs (auto-deleted)
+├── _audio_chunks/         ← chunked WAVs for long-audio splitting (auto-deleted)
 ├── _diar_cache/           ← cached pyannote diarization results (reuse on reruns)
-└── _logs/                 ← rotating log files
+├── _logs/                 ← rotating log files
+└── _runs.db               ← SQLite run history (created when enable_runs_db=True)
 ```
 
 ---
@@ -160,7 +179,7 @@ my_project/
 | `large-v3-turbo` ⭐ | ~3.5 GB | fast | excellent |
 | `large-v3` | ~5.0 GB | slower | best |
 
-> `large-v3-turbo` is the recommended default: ~3× faster than `large-v3` with comparable accuracy.
+> `large-v3-turbo` is the recommended choice for most workflows: ~3× faster than `large-v3` with comparable accuracy. The default when no model is specified is `large-v3`.
 
 ---
 
@@ -176,22 +195,58 @@ Audio is automatically converted to 16 kHz mono WAV via `ffmpeg` before processi
 
 ```python
 TranscriptionConfig(
-    model            = "large-v3-turbo",  # Whisper model name
+    # ── Model ──────────────────────────────────────────────────────
+    model            = "large-v3",        # Whisper model name (default: large-v3)
     device           = "auto",            # "auto" | "cuda" | "cpu"
     compute_type     = "auto",            # "auto" | "float16" | "int8"
+
+    # ── Decoding ───────────────────────────────────────────────────
     beam_size        = 5,                 # 1 (greedy) to 10 (highest quality)
     language         = None,              # None = auto-detect; "en", "es", etc.
     initial_prompt   = None,              # glossary string for proper nouns / jargon
-    use_vad          = True,              # Silero VAD — skip silences
+                                          # per-file override: <stem>.prompt.txt next to audio
+
+    # ── VAD ────────────────────────────────────────────────────────
+    use_vad              = True,          # Silero VAD — skip silences
+    vad_min_silence_ms   = 500,           # silences ≥ N ms split segments
+
+    # ── Transcription ──────────────────────────────────────────────
     word_timestamps  = False,             # per-word timestamps (slower)
-    enable_diarization = True,            # set False for transcription only
-    num_speakers     = None,              # pin exact count if known
-    min_speakers     = None,              # or use min/max range
-    max_speakers     = None,
-    words_per_split  = 1950,              # chunk size for split files
+
+    # ── Diarization ────────────────────────────────────────────────
+    enable_diarization   = True,          # set False for transcription only
+    hf_token             = None,          # or set HF_TOKEN env var / Colab Secret
+    num_speakers         = None,          # pin exact count if known
+    min_speakers         = None,          # or use min/max range
+    max_speakers         = None,
+    diarization_model    = "pyannote/speaker-diarization-community-1",
+
+    # ── Transcript output ──────────────────────────────────────────
+    gap_max_s_transcript    = 2.0,        # seconds of silence to open a new speaker turn
+    generate_transcript_md  = True,       # write the readable .transcript.md
+    remove_fillers          = True,       # drop filler-only segments from .transcript.md
+                                          # (.json and .srt keep ALL segments)
+
+    # ── Splits and LLM output ──────────────────────────────────────
+    words_per_split          = 1950,      # chunk size for split files
+    produce_unified_for_llm  = True,      # also write a single _full_for_llm.txt
+
+    # ── Long-audio chunking ────────────────────────────────────────
+    long_audio_threshold_min = 120,       # audios longer than N min are chunked
+    chunk_duration_min       = 30,        # target chunk length in minutes
+    chunk_overlap_s          = 5,         # overlap between chunks in seconds
+
+    # ── Streaming ─────────────────────────────────────────────────
+    streaming_jsonl  = False,             # write segments to .segments.jsonl as produced
+
+    # ── Run control ────────────────────────────────────────────────
     force_reprocess  = False,             # True = ignore existing outputs
-    evaluate_quality = True,              # heuristic quality check
-    enable_runs_db   = False,             # SQLite run history (opt-in)
+    evaluate_quality = True,              # heuristic quality check after each file
+    enable_runs_db   = True,              # SQLite run history for idempotency by hash
+
+    # ── Disk safety ────────────────────────────────────────────────
+    disk_margin_factor  = 0.5,            # required free space = input_size × factor
+    disk_margin_min_mb  = 500,            # hard floor for required free space (MB)
 )
 ```
 
@@ -210,7 +265,9 @@ After each file, speakerscribe runs a heuristic quality check and logs any issue
 | `HIGH_WPM` | CRITICAL | > 250 words/min — likely Whisper hallucination |
 | `SPEAKER_DOMINANCE` | WARNING | One speaker > 95% — poor diarization |
 | `TOO_MANY_SPEAKERS` | WARNING | > 8 speakers detected — consider pinning `num_speakers` |
+| `TINY_SPEAKERS` | WARNING | Speakers with ≤ 2 segments — likely false positives |
 | `REPETITIONS` | CRITICAL | Consecutive repeated n-grams — Whisper hallucination loop |
+| `WORD_DOMINANCE` | WARNING | One word dominates the transcript — possible hallucination |
 | `EMPTY_SEGMENTS` | WARNING | > 10% empty segments — VAD too aggressive |
 
 ---

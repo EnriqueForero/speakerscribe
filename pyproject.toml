@@ -48,7 +48,7 @@ Documentation = "https://github.com/EnriqueForero/speakerscribe#readme"
 Changelog     = "https://github.com/EnriqueForero/speakerscribe/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
-where   = [".]
+where   = ["."]
 include = ["speakerscribe*"]
 exclude = ["tests*", "notebooks*", "docs*"]
 
