@@ -7,7 +7,118 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
-## [0.2.0] — 2026-05-03
+## [0.3.0] — 2026-06-11
+
+> Release auditado: cierra los hallazgos P0/P1 de la auditoría de junio 2026.
+
+### Fixed
+- **P0** — The `speakerscribe` CLI entry point described in the 0.2.0 notes
+  was never actually added to `pyproject.toml`; `0.2.0` was also never
+  published to PyPI. The entry point ships NOW (`[project.scripts]` +
+  `python -m speakerscribe`), with a subprocess regression test.
+- **P0** — A diarization failure no longer ends as a silent `"ok"`: the run
+  finishes as `status="ok_degraded"` with a CRITICAL `DIARIZATION_FAILED`
+  quality flag, is ledgered with `diar_model=None`, and is retried on the
+  next batch instead of being skipped.
+- **P0** — Temporary WAVs are now named by content signature
+  (`{stem}_{sig[:10]}.wav`): replacing a source file under the same name can
+  never resurrect a stale WAV.
+- SRT numbering in the streaming path is consecutive again (the counter
+  incremented before the empty-text filter; both paths now share one
+  `_SegmentWriter`).
+- `EMPTY_SEGMENTS` quality check now measures real data
+  (`empty_segments_discarded` in metadata) instead of an always-zero count.
+- `rename_speakers_in_outputs` is single-pass (regex alternation): swap
+  mappings (`00→01, 01→Ana`) no longer chain; `.segments.jsonl` included.
+- `delete_all_outputs` now also sweeps the scratch `_audio_chunks/` folder
+  and documents that the runs ledger is intentionally preserved (history,
+  not output).
+- `release.yml` no longer installs `hatchling` (backend is setuptools).
+- ffmpeg/ffprobe calls have hard timeouts (auto: 120 s + 2× duration) with
+  actionable errors instead of hanging on stalled Drive mounts.
+
+### Added
+- **Batched inference** (`batch_size`, default 8) via faster-whisper's
+  `BatchedInferencePipeline` (~3-4× on T4 per the upstream benchmark), with
+  an automatic OOM ladder (8→4→2→1; partial outputs rewritten cleanly).
+- **Word-level speaker attribution** (`speaker_assignment="word"`, default):
+  WhisperX-style re-segmentation at speaker changes + single-word island
+  smoothing. `"segment"` keeps the legacy behavior.
+- **Anti-hallucination decoding controls** exposed in config
+  (`condition_on_previous_text`, `temperature`, `compression_ratio_threshold`,
+  `log_prob_threshold`, `no_speech_threshold`,
+  `hallucination_silence_threshold`, `repetition_penalty`,
+  `no_repeat_ngram_size`) — defaults equal faster-whisper's.
+- **Auto-retry on critical** (`auto_retry_on_critical`, default True): one
+  retry with anti-loop overrides on CRITICAL `REPETITIONS`/`HIGH_WPM`; both
+  attempts ledgered; the better one kept (atomic promotion).
+- **Runs ledger in JSON-Lines** (`_runs.jsonl`, append-only, Drive/FUSE-safe)
+  replacing SQLite as default backend; legacy `_runs.db` remains readable
+  (transparent fallback + merged stats). SQLite still fully supported for
+  local `.db` paths.
+- **Fast content signatures** (`hash_mode="fast"`: size + first/last 8 MB)
+  with one-time transparent migration from pre-0.3 full-SHA-256 histories.
+- **Local scratch** for temporary WAVs/chunks (`WorkspacePaths.scratch`,
+  auto `/content/ss_scratch` on Colab) — no more multi-hundred-MB WAVs
+  round-tripping through Drive FUSE.
+- **`DiarizationEngine`**: pyannote pipeline loaded once per batch and
+  reused (it reloaded per file before).
+- **`loaded_whisper`** context manager guaranteeing model release
+  (`release_whisper_model` docstring now states its real semantics).
+- **Filler modes** `off|safe|aggressive` (default `safe`): "sí/no/claro/ok"
+  are only dropped in aggressive mode — they can be real answers.
+- **`speakerscribe bench`** + `speakerscribe.evaluate`: WER (jiwer) and
+  end-to-end DER (pyannote.metrics) against user references; extras
+  `pip install 'speakerscribe[bench]'`; results appended to the ledger.
+- **`speakerscribe.estimates`**: planning RTF table (was duplicated in the
+  notebook).
+- Atomic writes (`io_utils`) for `.json`, `.transcript.md` and caches.
+- Integration test suite (real espeak-ng audio + tiny model) on a weekly
+  CI job; unit CI runs in seconds against fakes, without the GPU stack.
+- Notebook (v9): fast direct install from the local wheel with ONE planned
+  automatic kernel restart when already-loaded binaries (numpy/torch) get
+  upgraded — pyannote.audio 4.0.x pins exact torch versions, so fully
+  constraint-frozen installs are unsolvable by design; the post-restart
+  fast-path re-verifies in seconds (import origin + version + stack-filtered
+  `pip check`). Keeps the import-shadowing guards, the deliverables cell with
+  `_resumen.md` + redacted run metadata, and the runtime shutdown cell. Merges the original notebook's clarity:
+  fully documented option surface (model/VRAM table, speaker range,
+  VAD/gap, filler modes, ≤4000-char glossary, deliverable selection),
+  a capabilities overview, a per-run JSON inspector cell, and a
+  flag-driven speaker rename that refreshes deliverables.
+  Supersedes the v7 staged installs and the v4 cell list:
+  constraints install (no restart), diagnostic cell, isolated
+  `_smoke/` workspace, ledger-backed history, optional bench cell.
+- **Typed package** (PEP 561): `py.typed` marker shipped; `mypy
+  speakerscribe/` passes with 0 errors and is enforced in CI. Internal
+  `RunOutputs` dataclass replaces the untyped output-paths dict.
+- `docs/ARCHITECTURE.md`: module responsibilities and the four runtime
+  contracts (idempotency, degradation, auto-retry, storage layout).
+
+### Changed
+- `initial_prompt` schema bound 500 → 4000 chars; the per-file glossary is
+  **no longer silently truncated** — Whisper conditions on the trailing
+  ~224 tokens and the library warns when a prompt exceeds that budget.
+- `remove_fillers` is a mode string (booleans coerced: True→"safe").
+- Coverage gate 25% → 45% (suite currently ~70%); pytest markers reduced
+  to `integration` / `gpu` / `slow`.
+
+### Deprecated
+- External long-audio chunking (`long_audio_threshold_min`, now default 0):
+  the batched path handles long audio natively and more accurately at
+  boundaries. The legacy path still works when explicitly enabled
+  (`chunk_overlap_s` default raised 5 → 30; word offsets now corrected),
+  and emits a `DeprecationWarning`.
+
+---
+
+## [0.2.0] — 2026-05-03 — never published
+
+> **Correction (2026-06-11):** this version was tagged in the changelog but
+> never released to PyPI, and the `[project.scripts]` entry point described
+> below was **not** actually present in `pyproject.toml` at this tag — that
+> fix ships in 0.3.0. The features below DID land in the codebase.
+
 
 ### Fixed
 - **Critical**: `pyproject.toml` line 51 had a malformed string literal

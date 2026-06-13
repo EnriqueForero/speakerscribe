@@ -1,26 +1,39 @@
-"""Optional SQLite-backed run history.
+"""Run history: append-only JSON-Lines ledger (primary) + legacy SQLite.
 
-When `TranscriptionConfig.enable_runs_db=True`, every run is logged to a
-local `_runs.db` under the workspace. Disabled by default — most users
-process audios one at a time and do not need a history database.
+Enabled by default (`TranscriptionConfig.enable_runs_db=True`): every run is
+logged under the workspace for robust content-hash idempotency.
 
-Benefits when enabled:
-    - Robust idempotency by file hash (not by filename)
-    - Queryable history: how many audios, average RTF, etc.
-    - Audit trail for institutional use
+Why JSON-Lines replaced SQLite as the default backend in 0.3:
+    The ledger lives in the workspace, which on Colab is Google Drive
+    mounted via FUSE. SQLite depends on POSIX file locking that Drive/FUSE
+    does not guarantee — long or interrupted sessions risk corruption and
+    phantom locks. An append-only JSONL file needs no locking, survives
+    mid-write crashes (at worst one torn trailing line, which readers
+    skip), and is human-readable.
 
-The schema is intentionally simple: ~15 columns with appropriate indices.
+Backend selection is path-driven and the public API is unchanged:
+    - ``*.jsonl`` -> JSONL backend (primary). Lookups that miss fall back
+      to a sibling ``_runs.db`` (read-only) so pre-0.3 histories keep
+      working; ``list_runs``/``global_stats`` merge both sources.
+    - ``*.db``    -> SQLite backend (still fully functional for local,
+      non-Drive use).
+
+Record semantics: one line per run attempt; for a given key
+``(file_hash, asr_model, diar_model)`` the LAST line wins (same effect as
+SQLite's ``INSERT OR REPLACE``).
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from speakerscribe.io_utils import append_jsonl_line
 from speakerscribe.logging_config import logger
 
 _SCHEMA_SQL = """
@@ -41,7 +54,7 @@ CREATE TABLE IF NOT EXISTS runs (
     quality_flags   TEXT,              -- JSON
     config_json     TEXT,
     package_version TEXT,
-    status          TEXT NOT NULL,     -- ok | error | skipped
+    status          TEXT NOT NULL,     -- ok | ok_degraded | error | skipped
     error_message   TEXT,
     UNIQUE(file_hash, asr_model, diar_model)
 );
@@ -52,7 +65,102 @@ CREATE INDEX IF NOT EXISTS idx_runs_processed   ON runs(processed_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status      ON runs(status);
 """
 
+_LEGACY_DB_NAME = "_runs.db"
 
+
+def _is_jsonl(path: Path) -> bool:
+    return path.suffix.lower() == ".jsonl"
+
+
+def _legacy_db_for(ledger_path: Path) -> Path:
+    """Sibling legacy SQLite path for a JSONL ledger."""
+    return ledger_path.with_name(_LEGACY_DB_NAME)
+
+
+def _record_from_metadata(
+    metadata: dict[str, Any],
+    file_hash: str,
+    quality_ok: bool | None,
+    quality_flags_json: str | None,
+    status: str,
+    error_message: str | None,
+    attempt: int,
+) -> dict[str, Any]:
+    """Normalize run metadata into a flat ledger record (shared by backends)."""
+    return {
+        "id": time.time_ns() // 1_000,  # monotonic-enough unique id (µs)
+        "audio_file": metadata.get("audio_file"),
+        "file_hash": file_hash,
+        "processed_at": metadata.get("processed_at"),
+        "duration_min": metadata.get("duration_minutes"),
+        "elapsed_sec": metadata.get("elapsed_seconds"),
+        "rtf": metadata.get("real_time_factor"),
+        "asr_model": metadata.get("model"),
+        "diar_model": metadata.get("diarization_model"),
+        "n_speakers": len(metadata.get("speakers_summary") or {}) or None,
+        "n_segments": metadata.get("total_segments"),
+        "n_words": metadata.get("total_words"),
+        "quality_ok": int(quality_ok) if quality_ok is not None else None,
+        "quality_flags": quality_flags_json,
+        "config_json": json.dumps(metadata.get("config", {}), ensure_ascii=False),
+        "package_version": metadata.get("package_version"),
+        "status": status,
+        "error_message": error_message,
+        "attempt": attempt,
+    }
+
+
+# ─── JSONL backend ─────────────────────────────────────────────────
+def _iter_jsonl_records(path: Path) -> Iterator[dict[str, Any]]:
+    """Yield records from a JSONL ledger, skipping torn/garbage lines.
+
+    A crash during append can leave one incomplete trailing line; that is
+    by design recoverable — we log it at DEBUG and move on.
+    """
+    if not path.exists():
+        return
+    with path.open(encoding="utf-8") as f:
+        for n, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug(f"Skipping malformed ledger line {n} in {path.name}")
+                continue
+            if isinstance(rec, dict):
+                yield rec
+
+
+def _jsonl_find(
+    path: Path,
+    file_hash: str,
+    asr_model: str,
+    diar_model: str | None,
+) -> dict[str, Any] | None:
+    """Last record matching the key wins (append-only REPLACE semantics)."""
+    found: dict[str, Any] | None = None
+    for rec in _iter_jsonl_records(path):
+        if (
+            rec.get("file_hash") == file_hash
+            and rec.get("asr_model") == asr_model
+            and rec.get("diar_model") == diar_model
+        ):
+            found = rec
+    return found
+
+
+def _dedupe_latest(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse records to the latest per (file_hash, asr_model, diar_model)."""
+    latest: dict[tuple, dict[str, Any]] = {}
+    for rec in records:  # input is in append order -> later overwrites
+        key = (rec.get("file_hash"), rec.get("asr_model"), rec.get("diar_model"))
+        latest[key] = rec
+    return list(latest.values())
+
+
+# ─── SQLite backend (legacy / local) ───────────────────────────────
 @contextmanager
 def _connection(db_path: Path) -> Iterator[sqlite3.Connection]:
     """Context manager for SQLite with automatic commit and Row factory."""
@@ -67,32 +175,7 @@ def _connection(db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def register_run(
-    db_path: Path,
-    metadata: dict[str, Any],
-    file_hash: str,
-    quality_ok: bool | None = None,
-    quality_flags_json: str | None = None,
-    status: str = "ok",
-    error_message: str | None = None,
-) -> int:
-    """Insert (or replace) a run row in the database.
-
-    Conflict on UNIQUE(file_hash, asr_model, diar_model) triggers a REPLACE.
-
-    Args:
-        db_path: Path to the .db file.
-        metadata: Run metadata, typically the dict returned by
-            `transcribe_streaming`.
-        file_hash: SHA-256 of the source audio.
-        quality_ok: True/False/None — result of the quality check.
-        quality_flags_json: JSON-serialized list of flag strings.
-        status: "ok" | "error" | "skipped".
-        error_message: Error message when status="error".
-
-    Returns:
-        Row id of the inserted (or replaced) record.
-    """
+def _sqlite_register(record: dict[str, Any], db_path: Path) -> int:
     with _connection(db_path) as conn:
         cur = conn.execute(
             """
@@ -107,53 +190,36 @@ def register_run(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                metadata.get("audio_file"),
-                file_hash,
-                metadata.get("processed_at"),
-                metadata.get("duration_minutes"),
-                metadata.get("elapsed_seconds"),
-                metadata.get("real_time_factor"),
-                metadata.get("model"),
-                metadata.get("diarization_model"),
-                len(metadata.get("speakers_summary") or {}) or None,
-                metadata.get("total_segments"),
-                metadata.get("total_words"),
-                int(quality_ok) if quality_ok is not None else None,
-                quality_flags_json,
-                json.dumps(metadata.get("config", {}), ensure_ascii=False),
-                metadata.get("package_version"),
-                status,
-                error_message,
+                record["audio_file"],
+                record["file_hash"],
+                record["processed_at"],
+                record["duration_min"],
+                record["elapsed_sec"],
+                record["rtf"],
+                record["asr_model"],
+                record["diar_model"],
+                record["n_speakers"],
+                record["n_segments"],
+                record["n_words"],
+                record["quality_ok"],
+                record["quality_flags"],
+                record["config_json"],
+                record["package_version"],
+                record["status"],
+                record["error_message"],
             ),
         )
-        run_id = cur.lastrowid or 0
-        logger.debug(f"Run registered in DB: id={run_id} hash={file_hash[:8]}")
-        return run_id
+        return cur.lastrowid or 0
 
 
-def find_run_by_hash(
+def _sqlite_find(
     db_path: Path,
     file_hash: str,
     asr_model: str,
-    diar_model: str | None = None,
+    diar_model: str | None,
 ) -> dict[str, Any] | None:
-    """Look up a previous run by content hash + model combination.
-
-    If the file was renamed but its content is identical, this still detects
-    the duplicate.
-
-    Args:
-        db_path: Path to the .db file.
-        file_hash: SHA-256 of the source audio.
-        asr_model: Whisper model name used for the run.
-        diar_model: Diarization model id (or None for no-diarization runs).
-
-    Returns:
-        Dict with the row data if found, else None.
-    """
     if not db_path.exists():
         return None
-
     with _connection(db_path) as conn:
         if diar_model is None:
             cur = conn.execute(
@@ -169,24 +235,9 @@ def find_run_by_hash(
         return dict(row) if row else None
 
 
-def list_runs(
-    db_path: Path,
-    limit: int = 50,
-    status: str | None = None,
-) -> list[dict[str, Any]]:
-    """List the most recent runs.
-
-    Args:
-        db_path: Path to the .db file.
-        limit: Maximum number of rows to return.
-        status: Filter by status (ok/error/skipped) or None for all.
-
-    Returns:
-        List of dicts, newest first.
-    """
+def _sqlite_list(db_path: Path, limit: int, status: str | None) -> list[dict[str, Any]]:
     if not db_path.exists():
         return []
-
     with _connection(db_path) as conn:
         if status:
             cur = conn.execute(
@@ -194,42 +245,143 @@ def list_runs(
                 (status, limit),
             )
         else:
-            cur = conn.execute(
-                "SELECT * FROM runs ORDER BY id DESC LIMIT ?",
-                (limit,),
-            )
+            cur = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in cur.fetchall()]
 
 
-def global_stats(db_path: Path) -> dict[str, Any]:
-    """Compute aggregate statistics over all runs.
+# ─── Public API (backend-agnostic) ─────────────────────────────────
+def register_run(
+    db_path: Path,
+    metadata: dict[str, Any],
+    file_hash: str,
+    quality_ok: bool | None = None,
+    quality_flags_json: str | None = None,
+    status: str = "ok",
+    error_message: str | None = None,
+    attempt: int = 1,
+) -> int:
+    """Record a run in the ledger (JSONL append) or database (SQLite REPLACE).
 
     Args:
-        db_path: Path to the .db file.
+        db_path: ``*.jsonl`` ledger (primary) or ``*.db`` SQLite path.
+        metadata: Run metadata, typically the dict returned by
+            ``transcribe_streaming``.
+        file_hash: Content signature of the source audio (see
+            ``audio.file_signature``).
+        quality_ok: True/False/None — result of the quality check.
+        quality_flags_json: JSON-serialized list of flag strings.
+        status: "ok" | "ok_degraded" | "error" | "skipped".
+        error_message: Error message when status="error".
+        attempt: 1 for the first pass; 2 for an auto-retry pass. Both
+            attempts of a retried run are recorded for auditability.
 
     Returns:
-        Dict with totals, average RTF, total hours processed, etc. If the DB
-        does not exist, returns `{"total_runs": 0}`.
+        Record id (microsecond timestamp for JSONL; rowid for SQLite).
     """
-    if not db_path.exists():
+    record = _record_from_metadata(
+        metadata, file_hash, quality_ok, quality_flags_json, status, error_message, attempt
+    )
+    if _is_jsonl(db_path):
+        append_jsonl_line(db_path, record)
+        run_id = int(record["id"])
+    else:
+        run_id = _sqlite_register(record, db_path)
+    logger.debug(f"Run registered: id={run_id} hash={file_hash[:8]} status={status}")
+    return run_id
+
+
+def find_run_by_hash(
+    db_path: Path,
+    file_hash: str,
+    asr_model: str,
+    diar_model: str | None = None,
+) -> dict[str, Any] | None:
+    """Look up a previous run by content hash + model combination.
+
+    If the file was renamed but its content is identical, this still detects
+    the duplicate. On a JSONL ledger, a miss transparently falls back to the
+    sibling legacy ``_runs.db`` (read-only) so histories recorded before 0.3
+    keep preventing reprocessing.
+
+    Args:
+        db_path: ``*.jsonl`` ledger or ``*.db`` SQLite path.
+        file_hash: Content signature of the source audio.
+        asr_model: Whisper model name used for the run.
+        diar_model: Diarization model id (or None for no-diarization runs).
+            Note: a run whose diarization FAILED is recorded with
+            ``diar_model=None`` and ``status="ok_degraded"``, so it never
+            blocks a future run that succeeds at diarizing.
+
+    Returns:
+        Dict with the record if found, else None.
+    """
+    if _is_jsonl(db_path):
+        rec = _jsonl_find(db_path, file_hash, asr_model, diar_model)
+        if rec is not None:
+            return rec
+        return _sqlite_find(_legacy_db_for(db_path), file_hash, asr_model, diar_model)
+    return _sqlite_find(db_path, file_hash, asr_model, diar_model)
+
+
+def list_runs(
+    db_path: Path,
+    limit: int = 50,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """List the most recent runs, newest first.
+
+    On a JSONL ledger, legacy SQLite rows are merged in (deduplicated by
+    run key, ledger wins) so the full history stays visible after the 0.3
+    backend migration.
+
+    Args:
+        db_path: ``*.jsonl`` ledger or ``*.db`` SQLite path.
+        limit: Maximum number of records to return.
+        status: Filter by status or None for all.
+
+    Returns:
+        List of dicts, newest first.
+    """
+    if not _is_jsonl(db_path):
+        return _sqlite_list(db_path, limit, status)
+
+    legacy = _sqlite_list(_legacy_db_for(db_path), limit=1_000_000, status=None)
+    legacy.reverse()  # oldest first, so JSONL records override on dedupe
+    merged = _dedupe_latest(legacy + list(_iter_jsonl_records(db_path)))
+    if status:
+        merged = [r for r in merged if r.get("status") == status]
+    merged.sort(key=lambda r: (r.get("processed_at") or "", r.get("id") or 0), reverse=True)
+    return merged[:limit]
+
+
+def global_stats(db_path: Path) -> dict[str, Any]:
+    """Compute aggregate statistics over all runs (latest attempt per key).
+
+    Args:
+        db_path: ``*.jsonl`` ledger or ``*.db`` SQLite path.
+
+    Returns:
+        Dict with totals, average RTF, total hours processed, etc.
+        ``{"total_runs": 0}`` when no history exists.
+    """
+    records = list_runs(db_path, limit=1_000_000, status=None)
+    if not records:
         return {"total_runs": 0}
 
-    with _connection(db_path) as conn:
-        cur = conn.execute(
-            """
-            SELECT
-                COUNT(*)                                          AS total_runs,
-                SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END)      AS ok_runs,
-                SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)   AS error_runs,
-                SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END) AS skipped_runs,
-                ROUND(AVG(rtf), 2)                                AS avg_rtf,
-                ROUND(SUM(duration_min) / 60, 2)                  AS hours_processed,
-                SUM(n_words)                                      AS total_words
-            FROM runs
-            """
-        )
-        row = cur.fetchone()
-        return dict(row) if row else {"total_runs": 0}
+    ok = [r for r in records if r.get("status") in ("ok", "ok_degraded")]
+    rtfs = [r["rtf"] for r in ok if isinstance(r.get("rtf"), int | float)]
+    durations = [r["duration_min"] for r in ok if isinstance(r.get("duration_min"), int | float)]
+    words = [r["n_words"] for r in ok if isinstance(r.get("n_words"), int | float)]
+    return {
+        "total_runs": len(records),
+        "ok_runs": sum(1 for r in records if r.get("status") == "ok"),
+        "ok_degraded_runs": sum(1 for r in records if r.get("status") == "ok_degraded"),
+        "error_runs": sum(1 for r in records if r.get("status") == "error"),
+        "skipped_runs": sum(1 for r in records if r.get("status") == "skipped"),
+        "avg_rtf": round(sum(rtfs) / len(rtfs), 2) if rtfs else None,
+        "hours_processed": round(sum(durations) / 60, 2) if durations else None,
+        "total_words": int(sum(words)) if words else None,
+    }
 
 
 __all__ = [

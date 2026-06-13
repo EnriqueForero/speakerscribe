@@ -28,16 +28,24 @@ class TestTranscriptionConfig:
         c = TranscriptionConfig()
         assert c.enable_runs_db is True
 
-    def test_default_chunking(self):
-        """Long-audio chunking defaults: 120 min threshold, 30 min chunks, 5s overlap."""
-        c = TranscriptionConfig()
-        assert c.long_audio_threshold_min == 120
-        assert c.chunk_duration_min == 30
-        assert c.chunk_overlap_s == 5
+    def test_default_chunking_disabled(self):
+        """External chunking is DEPRECATED and disabled by default since 0.3.
 
-    def test_default_remove_fillers_on(self):
+        The batched path handles long audio natively; chunk_overlap_s was
+        raised 5 -> 30 for users who explicitly opt back in.
+        """
         c = TranscriptionConfig()
-        assert c.remove_fillers is True
+        assert c.long_audio_threshold_min == 0
+        assert c.chunk_duration_min == 30
+        assert c.chunk_overlap_s == 30
+
+    def test_default_remove_fillers_safe(self):
+        """Default filler mode is 'safe'; legacy booleans are coerced."""
+        c = TranscriptionConfig()
+        assert c.remove_fillers == "safe"
+        assert TranscriptionConfig(remove_fillers=True).remove_fillers == "safe"
+        assert TranscriptionConfig(remove_fillers=False).remove_fillers == "off"
+        assert TranscriptionConfig(remove_fillers="aggressive").remove_fillers == "aggressive"
 
     def test_default_unified_for_llm_on(self):
         c = TranscriptionConfig()
@@ -104,8 +112,11 @@ class TestTranscriptionConfig:
         assert c.max_speakers is None
 
     def test_initial_prompt_max_length(self):
+        """Schema bound raised to 4000 in 0.3 (Whisper itself only reads the
+        trailing ~224 tokens; the transcription layer warns, never truncates)."""
+        assert TranscriptionConfig(initial_prompt="x" * 1000).initial_prompt == "x" * 1000
         with pytest.raises(ValidationError):
-            TranscriptionConfig(initial_prompt="x" * 1000)
+            TranscriptionConfig(initial_prompt="x" * 5000)
 
     def test_language_normalized(self):
         c = TranscriptionConfig(language="EN")
@@ -172,7 +183,8 @@ class TestPerFileGlossary:
         c = TranscriptionConfig(initial_prompt=None)
         assert c.resolve_initial_prompt(audio) is None
 
-    def test_resolve_per_file_truncated_to_500_chars(self, tmp_path):
+    def test_resolve_per_file_not_truncated(self, tmp_path):
+        """Silent truncation removed in 0.3 — the full glossary is forwarded."""
         audio = tmp_path / "m.mp4"
         audio.write_text("fake")
         prompt_file = tmp_path / "m.prompt.txt"
@@ -180,7 +192,7 @@ class TestPerFileGlossary:
         c = TranscriptionConfig()
         resolved = c.resolve_initial_prompt(audio)
         assert resolved is not None
-        assert len(resolved) == 500
+        assert len(resolved) == 800
 
     def test_resolve_empty_per_file_falls_back(self, tmp_path):
         audio = tmp_path / "m.mp4"
@@ -198,8 +210,12 @@ class TestWorkspacePaths:
         assert p.data == tmp_path / "data"
         assert p.transcripts == tmp_path / "transcripts"
         assert p.splits == tmp_path / "splits"
-        assert p.audio_tmp == tmp_path / "_audio_temp"
-        assert p.audio_chunks == tmp_path / "_audio_chunks"
+        # High-churn temporaries live in LOCAL scratch since 0.3, not in the
+        # (Drive) workspace: scratch_base resolves to /content on Colab or
+        # the system tmp dir elsewhere.
+        assert p.audio_tmp == p.scratch_base / "_audio_temp"
+        assert p.audio_chunks == p.scratch_base / "_audio_chunks"
+        assert p.ledger_path == tmp_path / "_runs.jsonl"
         assert p.diar_cache == tmp_path / "_diar_cache"
         assert p.logs == tmp_path / "_logs"
         assert p.db_path == tmp_path / "_runs.db"

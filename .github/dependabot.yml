@@ -1,0 +1,59 @@
+version: 2
+updates:
+  # Python dependencies (pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Bogota"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+      include: "scope"
+    groups:
+      # Keep ML model deps together — they typically need synchronized bumps
+      ml-stack:
+        patterns:
+          - "torch*"
+          - "faster-whisper*"
+          - "pyannote*"
+          - "onnxruntime*"
+      # Dev tooling rarely needs separate PRs
+      dev-tools:
+        patterns:
+          - "ruff*"
+          - "pytest*"
+          - "mypy*"
+          - "pre-commit*"
+        dependency-type: "development"
+    # Hold back major upgrades for the ML stack — they often break the pipeline.
+    # Patch + minor are auto-PR'd; majors require human review by tagging only.
+    ignore:
+      - dependency-name: "torch"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pyannote.audio"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "faster-whisper"
+        update-types: ["version-update:semver-major"]
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Bogota"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

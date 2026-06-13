@@ -1,11 +1,12 @@
 """Transcript Markdown generation grouped by speaker turns + text splitting.
 
-New in 0.2:
-    - `remove_fillers` filters segments whose text is only filler words
-      (uh, um, eh, ehm, ...) for the detected language. The .json keeps
-      everything for traceability; this only affects the readable .transcript.md.
-    - `write_unified_for_llm` produces a single concatenated file convenient
-      for LLMs with large context windows.
+Filler filtering (`remove_fillers`):
+    "safe"       — drop pure hesitation sounds only (eh, um, mmm).
+    "aggressive" — additionally drop discourse markers (sí, no, claro, ok).
+                   WARNING: those can be real answers ("¿Aprobamos?" — "Sí.").
+    "off"        — keep everything.
+    The .json and .srt ALWAYS keep all segments for traceability; the filter
+    only affects the readable .transcript.md.
 """
 
 from __future__ import annotations
@@ -14,7 +15,13 @@ import re
 from pathlib import Path
 
 from speakerscribe.audio import format_hms
-from speakerscribe.config import FILLER_WORDS, SPK_NO_DIARIZATION
+from speakerscribe.config import (
+    FILLERS_SAFE,
+    SPK_NO_DIARIZATION,
+    FillerMode,
+    fillers_for,
+)
+from speakerscribe.io_utils import atomic_write_text
 from speakerscribe.logging_config import logger
 
 # Punctuation stripped before checking against the filler set
@@ -22,24 +29,26 @@ _PUNCT_STRIP_RE = re.compile(r"[\.\,\;\:\!\?\¿\¡\…\-\–\—\(\)\"'`]+$")
 _LEADING_PUNCT_RE = re.compile(r"^[\.\,\;\:\!\?\¿\¡\…\-\–\—\(\)\"'`]+")
 
 
-def is_filler_only(text: str, language: str | None) -> bool:
+def is_filler_only(text: str, language: str | None, mode: FillerMode = "safe") -> bool:
     """Return True if `text` is composed entirely of filler tokens.
 
     Comparison is case-insensitive and strips leading/trailing punctuation.
-    The filler list is language-specific (see `FILLER_WORDS` in config).
-    Languages without a defined filler set always return False.
+    The filler set depends on `mode` (see `FILLERS_SAFE` /
+    `FILLERS_AGGRESSIVE` in config). Languages without a defined set always
+    return False.
 
     Args:
         text: Segment text to evaluate.
         language: Two-letter language code (e.g. "es", "en"). None disables
             the filter (returns False).
+        mode: "off" | "safe" | "aggressive".
 
     Returns:
         True if the segment should be considered a pure filler.
     """
-    if not text or not language:
+    if not text or not language or mode == "off":
         return False
-    fillers = FILLER_WORDS.get(language)
+    fillers = fillers_for(language, mode)
     if not fillers:
         return False
     cleaned = _LEADING_PUNCT_RE.sub("", text.strip().lower())
@@ -55,7 +64,7 @@ def generate_transcript_md(
     metadata: dict,
     gap_max_s: float = 2.0,
     *,
-    remove_fillers: bool = True,
+    remove_fillers: FillerMode | bool = "safe",
 ) -> int:
     """Generate a `.transcript.md` file by grouping consecutive same-speaker segments.
 
@@ -73,12 +82,15 @@ def generate_transcript_md(
             speakers_summary, diarization_enabled, model, package_version, etc.
         gap_max_s: If two consecutive segments by the same speaker are more
             than N seconds apart, they are split into separate blocks.
-        remove_fillers: If True, segments whose text is only filler words for
-            the detected language are dropped from the readable output.
+        remove_fillers: Filler filtering mode ("off" | "safe" | "aggressive").
+            Booleans are accepted for backward compatibility
+            (True -> "safe", False -> "off").
 
     Returns:
         Number of turn blocks written.
     """
+    if isinstance(remove_fillers, bool):  # legacy callers
+        remove_fillers = "safe" if remove_fillers else "off"
     output_md.parent.mkdir(parents=True, exist_ok=True)
 
     if not segments:
@@ -89,12 +101,17 @@ def generate_transcript_md(
     language = metadata.get("language_detected")
 
     # ── Filter fillers if requested
-    if remove_fillers:
+    if remove_fillers != "off":
         before = len(segments)
-        segments = [s for s in segments if not is_filler_only(s.get("text", ""), language)]
+        segments = [
+            s for s in segments if not is_filler_only(s.get("text", ""), language, remove_fillers)
+        ]
         n_dropped = before - len(segments)
         if n_dropped:
-            logger.info(f"   Filtered {n_dropped} filler-only segments from .transcript.md")
+            logger.info(
+                f"   Filtered {n_dropped} filler-only segments "
+                f"(mode={remove_fillers}) from .transcript.md"
+            )
 
     if not segments:
         output_md.write_text("# Empty transcript (all fillers)\n", encoding="utf-8")
@@ -172,10 +189,10 @@ def generate_transcript_md(
         )
         lines.append("")
 
-    if remove_fillers and language in FILLER_WORDS:
+    if remove_fillers != "off" and language in FILLERS_SAFE:
         lines.append(
-            f"> Filler words for `{language}` removed from this readable view. "
-            f"The .json contains all original segments."
+            f"> Filler words for `{language}` removed from this readable view "
+            f"(mode: {remove_fillers}). The .json contains all original segments."
         )
         lines.append("")
 
@@ -198,7 +215,7 @@ def generate_transcript_md(
         lines.append(text)
         lines.append("")
 
-    output_md.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(output_md, "\n".join(lines))
     logger.info(f"Transcript MD: {len(blocks)} turns in {output_md.name}")
     return len(blocks)
 

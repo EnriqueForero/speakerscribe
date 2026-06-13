@@ -4,8 +4,9 @@ Commands:
     process        Process every media file in <workspace>/data/
     smoke-test     Run a smoke test with the 'small' model on the first file
     inspect        Print a quick summary of a transcription JSON file
-    stats          Show aggregate statistics from the runs database
+    stats          Show aggregate statistics from the runs ledger
     list-runs      List the most recent N runs
+    bench          Compute WER/DER against user references (extras: [bench])
     rename         Replace SPEAKER_XX labels with real names in outputs
     clean          Delete outputs (selectively or all)
     version        Show package version
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from rich.console import Console
@@ -66,7 +67,7 @@ def main(
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable DEBUG logging.")] = False,
 ) -> None:
     """speakerscribe — command line interface."""
-    level = "DEBUG" if verbose else "INFO"
+    level: Literal["DEBUG", "INFO"] = "DEBUG" if verbose else "INFO"
     configure_logging(console_level=level)
 
 
@@ -85,9 +86,39 @@ def process(
     word_timestamps: Annotated[
         bool, typer.Option("--word-timestamps/--no-word-timestamps")
     ] = False,
+    batch_size: Annotated[
+        int,
+        typer.Option("--batch-size", min=1, max=32, help="Batched inference size (1=sequential)."),
+    ] = 8,
+    speaker_assignment: Annotated[
+        str,
+        typer.Option(
+            "--speaker-assignment",
+            help="'word' (re-segment at speaker changes) or 'segment' (legacy).",
+        ),
+    ] = "word",
+    remove_fillers: Annotated[
+        str,
+        typer.Option(
+            "--remove-fillers", help="Filler filter for .transcript.md: off|safe|aggressive."
+        ),
+    ] = "safe",
+    hash_mode: Annotated[
+        str,
+        typer.Option(
+            "--hash-mode", help="Idempotency signature: fast (16 MB sample) | full (SHA-256)."
+        ),
+    ] = "fast",
+    auto_retry: Annotated[
+        bool,
+        typer.Option(
+            "--auto-retry/--no-auto-retry",
+            help="Retry once with anti-loop decoding on critical hallucination flags.",
+        ),
+    ] = True,
     enable_db: Annotated[
-        bool, typer.Option("--enable-db/--no-db", help="Enable SQLite run history.")
-    ] = False,
+        bool, typer.Option("--enable-db/--no-db", help="Enable the runs ledger (idempotency).")
+    ] = True,
     force: Annotated[bool, typer.Option("--force/--no-force")] = False,
     config_file: Annotated[
         Path | None,
@@ -113,6 +144,11 @@ def process(
             min_speakers=min_speakers,
             max_speakers=max_speakers,
             word_timestamps=word_timestamps,
+            batch_size=batch_size,
+            speaker_assignment=speaker_assignment,  # type: ignore[arg-type]
+            remove_fillers=remove_fillers,  # type: ignore[arg-type]
+            hash_mode=hash_mode,  # type: ignore[arg-type]
+            auto_retry_on_critical=auto_retry,
             enable_runs_db=enable_db,
             force_reprocess=force,
         )
@@ -120,7 +156,7 @@ def process(
     paths = WorkspacePaths(workspace=str(workspace))
     results = process_batch(paths, config)
 
-    n_ok = sum(1 for r in results if r.get("status") == "ok")
+    n_ok = sum(1 for r in results if r.get("status") in ("ok", "ok_degraded", "skipped"))
     if n_ok == 0:
         raise typer.Exit(1)
 
@@ -129,7 +165,11 @@ def process(
 def smoke_test_cmd(
     workspace: Annotated[Path, typer.Option("--workspace", "-w")],
 ) -> None:
-    """Run a fast smoke test using the 'small' model on the first media file."""
+    """Run a fast smoke test using the 'small' model on the first media file.
+
+    Outputs go to an isolated <workspace>/_smoke sub-workspace so they never
+    mix with (or skip-shadow) real production outputs.
+    """
     configure_logging(workspace=workspace)
 
     config = TranscriptionConfig(
@@ -137,6 +177,8 @@ def smoke_test_cmd(
         beam_size=1,
         enable_diarization=True,
         force_reprocess=True,
+        enable_runs_db=False,
+        evaluate_quality=False,
     )
     paths = WorkspacePaths(workspace=str(workspace))
     media = paths.list_media_files()
@@ -144,22 +186,19 @@ def smoke_test_cmd(
         console.print("[red]No media files in data/[/red]")
         raise typer.Exit(1)
 
-    from speakerscribe.pipeline import preflight_check, process_one
-    from speakerscribe.transcription import (
-        load_whisper_model,
-        release_whisper_model,
-    )
+    from speakerscribe.pipeline import process_one
+    from speakerscribe.transcription import loaded_whisper
 
-    preflight_check(paths, config)
-    model = load_whisper_model(config)
-    try:
-        result = process_one(media[0], paths, model, config)
-        if result.get("status") == "ok":
-            console.print("[green]SMOKE TEST OK[/green]")
-        else:
-            console.print(f"[yellow]Smoke test status={result.get('status')}[/yellow]")
-    finally:
-        release_whisper_model(model)
+    smoke_paths = WorkspacePaths(workspace=str(Path(workspace) / "_smoke"))
+    smoke_paths.create_directories()
+    console.print(f"Smoke outputs -> {smoke_paths.base}")
+    with loaded_whisper(config) as model:
+        result = process_one(media[0], smoke_paths, model, config)
+    if result.get("status") in ("ok", "ok_degraded"):
+        console.print(f"[green]SMOKE TEST OK[/green] (status={result.get('status')})")
+    else:
+        console.print(f"[yellow]Smoke test status={result.get('status')}[/yellow]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -178,7 +217,7 @@ def stats(
 ) -> None:
     """Show aggregate statistics from the runs database (if present)."""
     paths = WorkspacePaths(workspace=str(workspace))
-    s = global_stats(paths.db_path)
+    s = global_stats(paths.ledger_path)
 
     table = Table(title=f"Statistics — {workspace}")
     table.add_column("Metric", style="cyan")
@@ -196,7 +235,7 @@ def list_runs_cmd(
 ) -> None:
     """List the most recent N runs from the database."""
     paths = WorkspacePaths(workspace=str(workspace))
-    runs = list_runs(paths.db_path, limit=limit, status=status)
+    runs = list_runs(paths.ledger_path, limit=limit, status=status)
     if not runs:
         console.print("[yellow]No runs recorded.[/yellow]")
         return
@@ -287,6 +326,58 @@ def clean(
     else:
         console.print("[yellow]Pass --pattern or --all[/yellow]")
         raise typer.Exit(1)
+
+
+@app.command()
+def bench(
+    workspace: Annotated[Path, typer.Option("--workspace", "-w", help="Project root path.")],
+    base_name: Annotated[
+        str,
+        typer.Option(
+            "--base-name",
+            help="Output base name, e.g. 'meeting_large-v3-turbo' (without extension).",
+        ),
+    ],
+    ref: Annotated[
+        Path, typer.Option("--ref", help="Reference transcript .txt (human ground truth).")
+    ],
+    rttm: Annotated[
+        Path | None,
+        typer.Option("--rttm", help="Reference diarization .rttm (optional, enables DER)."),
+    ] = None,
+    collar: Annotated[
+        float, typer.Option("--collar", help="DER forgiveness collar in seconds.")
+    ] = 0.25,
+) -> None:
+    """Compute WER (and DER with --rttm) for a finished run against references.
+
+    Requires the bench extras: pip install 'speakerscribe[bench]'.
+    Appends a 'bench' record to the runs ledger for traceability.
+    """
+    from speakerscribe.evaluate import bench_run
+
+    paths = WorkspacePaths(workspace=str(workspace))
+    try:
+        result = bench_run(paths, base_name, ref, reference_rttm=rttm, collar=collar)
+    except ImportError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+    table = Table(title=f"Benchmark — {base_name}")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("WER", f"{result['wer']:.2%}")
+    table.add_row("MER", f"{result['mer']:.2%}")
+    table.add_row("WIL", f"{result['wil']:.2%}")
+    if result.get("der") is not None:
+        table.add_row("DER", f"{result['der']:.2%}")
+        table.add_row("DER collar (s)", f"{collar}")
+    table.add_row("Ref words", str(result["reference_words"]))
+    table.add_row("Hyp words", str(result["hypothesis_words"]))
+    console.print(table)
 
 
 @app.command()

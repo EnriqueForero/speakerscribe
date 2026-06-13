@@ -160,6 +160,24 @@ def evaluate_transcription_quality(metadata: dict[str, Any]) -> QualityReport:
     flags: list[QualityFlag] = []
     metrics: dict[str, Any] = {}
 
+    # ── 0. Diarization failure (degraded run) ──────────────────────
+    # The pipeline sets `diarization_failed=True` when diarization was
+    # REQUESTED but raised: the user asked for speakers and got none.
+    # That is a CRITICAL quality event, not a silent "ok".
+    if metadata.get("diarization_failed"):
+        flags.append(
+            QualityFlag(
+                severity=Severity.CRITICAL,
+                code="DIARIZATION_FAILED",
+                message=(
+                    "Diarization was enabled but failed — transcript has NO "
+                    "speaker labels. Run is degraded; it will be retried on "
+                    "the next batch (not skipped)."
+                ),
+                context={"error": metadata.get("diarization_error")},
+            )
+        )
+
     # ── 1. Language confidence ─────────────────────────────────────
     lang_prob = metadata.get("language_probability")
     if lang_prob is not None:
@@ -289,20 +307,24 @@ def evaluate_transcription_quality(metadata: dict[str, Any]) -> QualityReport:
             )
 
     # ── 6. Empty / degenerate segments ─────────────────────────────
-    if segments:
-        empty_count = sum(1 for s in segments if not (s.get("text") or "").strip())
-        if empty_count / max(1, len(segments)) > 0.1:
-            flags.append(
-                QualityFlag(
-                    severity=Severity.WARNING,
-                    code="EMPTY_SEGMENTS",
-                    message=(
-                        f"{empty_count} empty segments "
-                        f"({empty_count / len(segments):.0%}) — VAD too aggressive?"
-                    ),
-                    context={"empty_count": empty_count, "total": len(segments)},
-                )
+    # Empty segments never reach metadata["segments"] (the writer discards
+    # them), so the count travels in `empty_segments_discarded` — set by
+    # the transcription layer. The denominator is what Whisper EMITTED.
+    empty_count = metadata.get("empty_segments_discarded", 0)
+    emitted = len(segments) + empty_count
+    metrics["empty_segments_discarded"] = empty_count
+    if emitted > 0 and empty_count / emitted > 0.1:
+        flags.append(
+            QualityFlag(
+                severity=Severity.WARNING,
+                code="EMPTY_SEGMENTS",
+                message=(
+                    f"{empty_count} empty segments discarded "
+                    f"({empty_count / emitted:.0%} of emitted) — VAD too aggressive?"
+                ),
+                context={"empty_count": empty_count, "emitted": emitted},
             )
+        )
 
         # Single-word dominance detection
         joined = " ".join((s.get("text") or "").lower() for s in segments)

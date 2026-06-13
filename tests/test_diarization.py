@@ -60,12 +60,8 @@ class TestDiarizationParamsHash:
         assert h1 != h2
 
     def test_different_min_max_different_hash(self):
-        h1 = diarization_params_hash(
-            TranscriptionConfig(min_speakers=2, max_speakers=4)
-        )
-        h2 = diarization_params_hash(
-            TranscriptionConfig(min_speakers=2, max_speakers=8)
-        )
+        h1 = diarization_params_hash(TranscriptionConfig(min_speakers=2, max_speakers=4))
+        h2 = diarization_params_hash(TranscriptionConfig(min_speakers=2, max_speakers=8))
         assert h1 != h2
 
     def test_different_model_different_hash(self):

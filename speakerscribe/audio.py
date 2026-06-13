@@ -3,8 +3,9 @@
 Public API:
     extract_audio_wav        — Extract 16 kHz mono WAV from any media file.
     get_audio_duration_seconds — Probe duration via ffprobe (no decoding).
-    split_long_audio         — Split a long WAV into overlapping chunks.
-    calculate_file_hash      — SHA-256 streaming hash (low memory).
+    split_long_audio         — Split a long WAV into overlapping chunks (legacy).
+    file_signature           — Content signature ("fast" sampled or "full" SHA-256).
+    calculate_file_hash      — Full SHA-256 streaming hash (alias of file_signature "full").
     format_srt_timestamp     — Seconds to SRT 'HH:MM:SS,mmm' format.
     format_hms               — Seconds to 'HH:MM:SS' for human reading.
 """
@@ -21,6 +22,30 @@ from datetime import timedelta
 from pathlib import Path
 
 from speakerscribe.logging_config import logger
+
+# ─── Subprocess timeouts ───────────────────────────────────────────
+FFPROBE_TIMEOUT_S = 30
+"""ffprobe reads container metadata only; 30 s is generous even on Drive/FUSE."""
+
+_FFMPEG_TIMEOUT_FLOOR_S = 120
+"""Minimum auto-computed ffmpeg timeout (covers startup + short files)."""
+
+
+def _auto_ffmpeg_timeout(duration_s: float | None, configured_s: int = 0) -> float:
+    """Resolve the ffmpeg timeout: explicit config wins; else 120 s + 2x duration.
+
+    Args:
+        duration_s: Known media duration in seconds, or None when unknown.
+        configured_s: User-configured hard timeout (0 = auto).
+
+    Returns:
+        Timeout in seconds for subprocess.run.
+    """
+    if configured_s > 0:
+        return float(configured_s)
+    if duration_s and duration_s > 0:
+        return _FFMPEG_TIMEOUT_FLOOR_S + 2.0 * duration_s
+    return 3600.0  # unknown duration: 1 h hard cap instead of hanging forever
 
 
 @dataclass(frozen=True)
@@ -51,6 +76,8 @@ def extract_audio_wav(
     input_file: Path,
     output_file: Path,
     sample_rate: int = 16_000,
+    *,
+    timeout_s: int = 0,
 ) -> Path:
     """Extract a 16 kHz mono WAV from an MP4/MKV/MP3/M4A/etc input file.
 
@@ -59,21 +86,27 @@ def extract_audio_wav(
         2. Guarantees 16 kHz mono, the format both models expect.
         3. 16 kHz mono PCM ~= 115 MB per hour of audio.
 
-    Idempotent: if the output WAV already exists, the function returns its path
-    without re-running ffmpeg.
+    Idempotent BY NAME: if `output_file` already exists, it is reused without
+    re-running ffmpeg. The caller is responsible for naming the output after
+    the SOURCE CONTENT (the pipeline uses `{stem}_{file_signature[:10]}.wav`)
+    so that replacing the source media with different content under the same
+    filename can never resurrect a stale WAV.
 
     Args:
         input_file: Path to the source media file (MP4, MP3, MKV, M4A, WAV, etc).
-        output_file: Destination WAV path.
+        output_file: Destination WAV path. Name it after the source content
+            (see idempotency note above).
         sample_rate: Sampling rate in Hz. 16000 is the standard for both
             Whisper and pyannote.
+        timeout_s: Hard subprocess timeout. 0 = auto (120 s + 2x duration).
 
     Returns:
         Path to the output WAV.
 
     Raises:
         FileNotFoundError: If the input file does not exist.
-        RuntimeError: If ffmpeg returns a non-zero exit code.
+        RuntimeError: If ffmpeg returns a non-zero exit code or exceeds
+            the timeout.
     """
     if not input_file.exists():
         raise FileNotFoundError(f"Input file not found: {input_file}")
@@ -102,7 +135,19 @@ def extract_audio_wav(
     ]
     logger.info(f"Extracting audio: {input_file.name} -> {output_file.name}")
     t0 = time.time()
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        duration_s: float | None = get_audio_duration_seconds(input_file)
+    except (RuntimeError, FileNotFoundError):
+        duration_s = None
+    timeout = _auto_ffmpeg_timeout(duration_s, timeout_s)
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffmpeg timed out after {timeout:.0f}s extracting {input_file.name}. "
+            f"If the source lives on Google Drive, copy it to local disk first, "
+            f"or raise `ffmpeg_timeout_s` in TranscriptionConfig."
+        ) from e
     if res.returncode != 0:
         raise RuntimeError(f"ffmpeg failed (exit {res.returncode}):\n{res.stderr}")
 
@@ -142,7 +187,15 @@ def get_audio_duration_seconds(path: Path) -> float:
         "json",
         str(path),
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        res = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=FFPROBE_TIMEOUT_S
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"ffprobe timed out after {FFPROBE_TIMEOUT_S}s on {path.name}. "
+            f"If the file lives on Google Drive, the mount may be stalled."
+        ) from e
     if res.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {res.stderr.strip()}")
     try:
@@ -157,10 +210,18 @@ def split_long_audio(
     input_wav: Path,
     output_dir: Path,
     chunk_duration_s: int = 1800,
-    overlap_s: int = 5,
+    overlap_s: int = 30,
     sample_rate: int = 16_000,
+    *,
+    timeout_s: int = 0,
 ) -> list[AudioChunk]:
     """Split a long WAV file into overlapping fixed-duration chunks.
+
+    .. deprecated:: 0.3
+        The batched faster-whisper path handles long audio natively (its
+        internal VAD partitions without cutting words). External chunking
+        adds boundary-truncation risk for no memory benefit. Kept for
+        users who explicitly set `long_audio_threshold_min > 0`.
 
     Strategy:
         Chunk N covers [N*step, N*step + chunk_duration_s] where
@@ -254,7 +315,15 @@ def split_long_audio(
             "pcm_s16le",
             str(chunk_path),
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        chunk_timeout = _auto_ffmpeg_timeout(end_s - start_s, timeout_s)
+        try:
+            res = subprocess.run(
+                cmd, capture_output=True, text=True, check=False, timeout=chunk_timeout
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"ffmpeg timed out after {chunk_timeout:.0f}s splitting chunk {i}."
+            ) from e
         if res.returncode != 0:
             raise RuntimeError(
                 f"ffmpeg failed splitting chunk {i} (exit {res.returncode}):\n{res.stderr}"
@@ -267,11 +336,67 @@ def split_long_audio(
     return chunks
 
 
-def calculate_file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
-    """Compute the SHA-256 of a file by streaming chunks (low memory footprint).
+_FAST_SIGNATURE_SAMPLE_BYTES = 8 << 20  # 8 MB head + 8 MB tail
 
-    Useful for content-based idempotency: if a file is renamed but its content
-    is identical, the hash will detect that it was already processed.
+
+def file_signature(path: Path, mode: str = "fast", chunk_size: int = 1 << 20) -> str:
+    """Compute a content signature for idempotency.
+
+    Modes:
+        "fast": SHA-256 over `size_bytes || first 8 MB || last 8 MB`. Reads
+            at most 16 MB regardless of file size — a full SHA-256 of a 2 GB
+            MP4 through Drive/FUSE costs minutes; this costs seconds. A
+            content change that leaves size AND both 8 MB extremes identical
+            is not detectable, which is not a realistic edit pattern for
+            recorded media (any re-encode changes headers and size).
+        "full": complete streaming SHA-256 of the file (pre-0.3 behavior;
+            byte-identical to legacy `_runs.db` hashes).
+
+    Both modes return bare hex so legacy ledger rows remain comparable in
+    "full" mode. The pipeline transparently falls back to a one-time "full"
+    lookup when a "fast" lookup misses, to recognize pre-0.3 runs.
+
+    Args:
+        path: File to sign.
+        mode: "fast" (default) or "full".
+        chunk_size: Read block size for "full" mode (default 1 MB).
+
+    Returns:
+        Hexadecimal SHA-256 digest.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If `mode` is not "fast" or "full".
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    if mode not in ("fast", "full"):
+        raise ValueError(f"mode must be 'fast' or 'full', got {mode!r}")
+
+    h = hashlib.sha256()
+    if mode == "full":
+        with path.open("rb") as f:
+            while chunk := f.read(chunk_size):
+                h.update(chunk)
+        return h.hexdigest()
+
+    size = path.stat().st_size
+    h.update(str(size).encode("ascii"))
+    with path.open("rb") as f:
+        h.update(f.read(_FAST_SIGNATURE_SAMPLE_BYTES))
+        if size > 2 * _FAST_SIGNATURE_SAMPLE_BYTES:
+            f.seek(size - _FAST_SIGNATURE_SAMPLE_BYTES)
+            h.update(f.read(_FAST_SIGNATURE_SAMPLE_BYTES))
+        elif size > _FAST_SIGNATURE_SAMPLE_BYTES:
+            f.seek(_FAST_SIGNATURE_SAMPLE_BYTES)
+            h.update(f.read())
+    return h.hexdigest()
+
+
+def calculate_file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
+    """Compute the full SHA-256 of a file (alias of `file_signature(mode="full")`).
+
+    Kept for backward compatibility; new code should call `file_signature`.
 
     Args:
         path: File to hash.
@@ -283,14 +408,7 @@ def calculate_file_hash(path: Path, chunk_size: int = 1 << 20) -> str:
     Raises:
         FileNotFoundError: If the file does not exist.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
-
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while chunk := f.read(chunk_size):
-            h.update(chunk)
-    return h.hexdigest()
+    return file_signature(path, mode="full", chunk_size=chunk_size)
 
 
 def format_srt_timestamp(seconds: float) -> str:
@@ -344,6 +462,7 @@ __all__ = [
     "AudioChunk",
     "calculate_file_hash",
     "extract_audio_wav",
+    "file_signature",
     "format_hms",
     "format_srt_timestamp",
     "get_audio_duration_seconds",

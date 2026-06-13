@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from speakerscribe.config import WorkspacePaths
+from speakerscribe.io_utils import atomic_write_json, atomic_write_text
 from speakerscribe.logging_config import logger
 
 
@@ -46,10 +48,14 @@ def delete_outputs_for(
 
 
 def delete_all_outputs(paths: WorkspacePaths, confirm: str = "") -> int:
-    """Delete ALL outputs (txt, srt, json, transcript.md, splits, diar cache).
+    """Delete ALL outputs (transcripts, splits, diar cache, temp WAVs/chunks).
 
-    Source files in `data/` are NOT touched. Requires explicit confirmation
-    to prevent accidents.
+    Source files in `data/` are NOT touched. The runs ledger (`_runs.jsonl`)
+    and legacy `_runs.db` are INTENTIONALLY preserved: they are audit
+    history, not outputs. Because the idempotency skip also requires the
+    output files to exist, deleted files WILL be reprocessed on the next
+    batch despite the surviving ledger entries. Requires explicit
+    confirmation to prevent accidents.
 
     Args:
         paths: WorkspacePaths instance.
@@ -65,7 +71,13 @@ def delete_all_outputs(paths: WorkspacePaths, confirm: str = "") -> int:
         raise ValueError('Confirmation required. Pass confirm="YES DELETE ALL" to proceed.')
 
     deleted = 0
-    for folder in [paths.transcripts, paths.splits, paths.diar_cache, paths.audio_tmp]:
+    for folder in [
+        paths.transcripts,
+        paths.splits,
+        paths.diar_cache,
+        paths.audio_tmp,
+        paths.audio_chunks,
+    ]:
         if not folder.exists():
             continue
         for f in folder.iterdir():
@@ -159,13 +171,22 @@ def rename_speakers_in_outputs(
         if not target.exists():
             continue
         content = target.read_text(encoding="utf-8")
+        # Single pass: match any "[SPEAKER_XX]" / "### SPEAKER_XX ·" occurrence
+        # and look it up in the mapping — chained replacements are impossible
+        # ({"SPEAKER_00": "SPEAKER_01", "SPEAKER_01": "Ana"} swaps correctly).
+        alternation = "|".join(re.escape(k) for k in mapping)
+        pattern = re.compile(rf"\[({alternation})\]|### ({alternation}) ·")
         n_replacements = 0
-        for spk_id, name in mapping.items():
-            before = content
-            content = content.replace(f"[{spk_id}]", f"[{name}]")
-            content = content.replace(f"### {spk_id} ·", f"### {name} ·")
-            n_replacements += before.count(f"[{spk_id}]") + before.count(f"### {spk_id} ·")
-        target.write_text(content, encoding="utf-8")
+
+        def _sub(m: re.Match[str]) -> str:
+            nonlocal n_replacements
+            n_replacements += 1
+            if m.group(1) is not None:
+                return f"[{mapping[m.group(1)]}]"
+            return f"### {mapping[m.group(2)]} ·"
+
+        content = pattern.sub(_sub, content)
+        atomic_write_text(target, content)
         stats[target.name] = n_replacements
         logger.info(f"   {target.name}: {n_replacements} replacements")
 
@@ -183,10 +204,32 @@ def rename_speakers_in_outputs(
             data["speakers_summary"] = {
                 mapping.get(k, k): v for k, v in data["speakers_summary"].items()
             }
-        with json_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(json_path, data)
         stats[json_path.name] = n_json
         logger.info(f"   {json_path.name}: {n_json} segments renamed")
+
+    # .segments.jsonl stores raw JSON per line (no brackets) — rename the
+    # `speaker` FIELD, not bracketed text.
+    jsonl_path = paths.transcripts / f"{base_name}.segments.jsonl"
+    if jsonl_path.exists():
+        n_jsonl = 0
+        out_lines: list[str] = []
+        for raw in jsonl_path.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                out_lines.append(raw)  # keep torn line untouched
+                continue
+            if entry.get("speaker") in mapping:
+                entry["speaker"] = mapping[entry["speaker"]]
+                n_jsonl += 1
+            out_lines.append(json.dumps(entry, ensure_ascii=False))
+        atomic_write_text(jsonl_path, "\n".join(out_lines) + "\n")
+        stats[jsonl_path.name] = n_jsonl
+        logger.info(f"   {jsonl_path.name}: {n_jsonl} segments renamed")
 
     return stats
 

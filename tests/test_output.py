@@ -14,15 +14,22 @@ from speakerscribe.output import (
 
 class TestIsFillerOnly:
     def test_basic_es(self):
+        # Safe mode (default): hesitation sounds only
         assert is_filler_only("eh", "es") is True
         assert is_filler_only("Eh.", "es") is True
         assert is_filler_only("EHM,", "es") is True
-        assert is_filler_only("o sea", "es") is True
+        # Discourse markers need aggressive mode — "sí" can be a REAL answer
+        assert is_filler_only("o sea", "es") is False
+        assert is_filler_only("o sea", "es", mode="aggressive") is True
+        assert is_filler_only("Sí.", "es") is False
+        assert is_filler_only("Sí.", "es", mode="aggressive") is True
+        assert is_filler_only("eh", "es", mode="off") is False
 
     def test_basic_en(self):
         assert is_filler_only("uh", "en") is True
         assert is_filler_only("Um.", "en") is True
-        assert is_filler_only("you know", "en") is True
+        assert is_filler_only("you know", "en") is False
+        assert is_filler_only("you know", "en", mode="aggressive") is True
 
     def test_real_text_not_filler(self):
         assert is_filler_only("Hola, ¿cómo estás?", "es") is False
@@ -64,9 +71,7 @@ class TestSplitTextByWords:
     def test_with_speakers_preserves_turns(self, tmp_path):
         src = tmp_path / "b.txt"
         src.write_text(
-            "[SPEAKER_00] Hola buenas tardes\n"
-            "[SPEAKER_01] Cómo estás\n"
-            "[SPEAKER_00] Bien y tú\n"
+            "[SPEAKER_00] Hola buenas tardes\n[SPEAKER_01] Cómo estás\n[SPEAKER_00] Bien y tú\n"
         )
         out_dir = tmp_path / "out"
         n = split_text_by_words(src, out_dir, max_words=4, has_speakers=True)
