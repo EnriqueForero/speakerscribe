@@ -31,6 +31,14 @@ El dueño descargó la rama de trabajo como zip, la subió a `Pruebas/Speakerscr
   - Guardias contra versión menor, borrados, contenido viejo y notebooks con valores locales.
 - `tests/test_cli.py` ya no importa `click`: typer 0.27 dejó de depender de él y la suite fallaba en entornos livianos.
 
+### PyPI está atrasado (HECHO)
+- PyPI tiene **0.1.1** como última versión. Fuente: https://pypi.org/pypi/speakerscribe/json, consultado el 2026-10-02.
+- 0.3.0 nunca llegó a PyPI, aunque su tag existe en GitHub.
+- `release.yml` falló en sus 3 ejecuciones (tags `v0.1.0`, `v0.1.1` y `v0.3.0`), siempre en el paso «Publish to PyPI (Trusted Publishing)». Fuente: [Actions, ejecución de v0.3.0](https://github.com/EnriqueForero/speakerscribe/actions/runs/27457399192).
+  - 0.1.0 y 0.1.1 llegaron a PyPI por otra vía. INFERENCIA: la subida local del notebook con `PYPI_TOKEN`.
+  - VACÍO: la causa exacta. Los registros expiraron (HTTP 410).
+  - INFERENCIA: falta el *trusted publisher* en PyPI. Configurarlo es lo primero de [GUIA_LOTE.md § 7](GUIA_LOTE.md#7-publicar-una-versión-en-pypi).
+
 ### Verificación (HECHO)
 Simulación de extremo a extremo del notebook de publicación: git real contra un remoto local y Colab simulado. Todos los escenarios dieron el resultado esperado:
 - Drive con 0.3.0: se detiene.
@@ -113,6 +121,6 @@ Otros:
 | Qué | Quién | Cuándo | Cómo |
 |---|---|---|---|
 | Prueba real en GPU T4 con un audio corto | Dueño | Próxima sesión de Colab | [GUIA_LOTE.md § Primera vez](GUIA_LOTE.md#4-primera-vez-después-de-esta-actualización) |
-| Publicar 0.4.0 en PyPI | Dueño + Claude | Después de una prueba exitosa | [GUIA_LOTE.md § Publicar](GUIA_LOTE.md#7-publicar-una-versión-en-pypi) |
+| Configurar el *trusted publisher* y el entorno `pypi`, y publicar 0.4.0 (PyPI sigue en 0.1.1) | Dueño + Claude | Después de una prueba exitosa | [GUIA_LOTE.md § Publicar](GUIA_LOTE.md#7-publicar-una-versión-en-pypi) |
 | Sincronizar la copia de código en Drive con GitHub | Dueño | Antes de volver a usar el notebook de publicación | Celda S ([GUIA_LOTE.md § 9](GUIA_LOTE.md#9-notebook-de-publicación)) |
 | Quitar el tope `av<19` | Mantenimiento | Cuando faster-whisper publique el arreglo #1495 | Subir el mínimo de faster-whisper y retirar el tope |
