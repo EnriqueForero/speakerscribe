@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 
-import click
 from typer.testing import CliRunner
 
 from speakerscribe import __version__
@@ -14,14 +14,18 @@ from speakerscribe.cli import app
 runner = CliRunner()
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 def _plain(text: str) -> str:
     """Drop ANSI styling.
 
     Typer forces a Rich terminal when GITHUB_ACTIONS, FORCE_COLOR or PY_COLORS
     is set, which splits option names like ``--batch-size`` into styled
-    fragments; assertions must not depend on where the tests run.
+    fragments; assertions must not depend on where the tests run. (No
+    ``click`` import: typer >= 0.27 no longer depends on it.)
     """
-    return click.unstyle(text)
+    return _ANSI.sub("", text)
 
 
 class TestEntryPoints:
