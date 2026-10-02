@@ -30,10 +30,28 @@ pip install -e ".[dev]"        # or: pip install --no-deps -e . + light deps (se
 - Outputs that gate idempotency (`.json`, ledger) are written atomically
   (`io_utils`); keep it that way.
 
-## Releasing
+## Data never goes to git
 
-1. Bump `version` in `pyproject.toml` (single source of truth) and add the
-   CHANGELOG section — claims in the changelog must be true at the tag.
-2. `python -m build` locally; install the wheel in a clean venv and run
-   `speakerscribe version` before tagging.
-3. Tag `vX.Y.Z` → `release.yml` publishes via PyPI Trusted Publishing.
+This repository is public. Audio, transcripts, journals (`events.jsonl`),
+ledgers (`_runs.jsonl`) and master JSON files carry names and content of
+real meetings: `.gitignore` excludes them and notebooks are committed
+**without outputs** (`scripts/lint_notebooks.py`, enforced in CI and by the
+pre-commit hook). Tests build their own synthetic data.
+
+## Releasing (single path: tag → GitHub Actions)
+
+1. Bump `__version__` in `speakerscribe/__init__.py` — the only version
+   source (`pyproject.toml` reads it dynamically) — and add the CHANGELOG
+   section. Claims in the changelog must be true at the tag.
+2. Merge to `main` with CI green.
+3. `python -m build && twine check dist/*`, install the wheel in a clean
+   venv and run `speakerscribe version`.
+4. Push the tag `vX.Y.Z`. `release.yml` checks tag == version, builds,
+   publishes to PyPI with Trusted Publishing (no tokens) and creates the
+   GitHub Release. Do not upload by hand: GitHub and PyPI must always carry
+   the same, latest version.
+
+One-time setup (repository owner): on PyPI → project `speakerscribe` →
+*Publishing* → add a trusted publisher with owner `EnriqueForero`,
+repository `speakerscribe`, workflow `release.yml`, environment `pypi`; and
+create the `pypi` environment under GitHub → Settings → Environments.

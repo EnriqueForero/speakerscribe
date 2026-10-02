@@ -17,3 +17,12 @@ repos:
         args: ["--maxkb=5000"]
       - id: check-merge-conflict
       - id: debug-statements
+
+  - repo: local
+    hooks:
+      - id: lint-notebooks
+        name: notebooks sin salidas ni apagados incondicionales
+        entry: python scripts/lint_notebooks.py
+        language: system
+        files: ^notebooks/.*\.ipynb$
+        pass_filenames: false
