@@ -29,7 +29,7 @@ Solo se edita la **celda 3** (configuración).
 
 ## 4. Primera vez después de esta actualización
 
-1. Abra el notebook nuevo: https://colab.research.google.com/github/EnriqueForero/speakerscribe/blob/main/notebooks/speakerscribe_lote.ipynb y guarde una copia en su Drive.
+1. Abra el notebook nuevo: https://colab.research.google.com/github/EnriqueForero/speakerscribe/blob/main/notebooks/speakerscribe_lote.ipynb y guarde una copia en su Drive (*Archivo → Guardar una copia en Drive*). Use **esa** copia de aquí en adelante. No ejecute la de `Pruebas/Speakerscribe/notebooks/`: es la copia de código, y la Celda S la reemplaza.
 2. Confirme que el secreto `HF_TOKEN` (🔑) tiene acceso al notebook.
 3. Ejecute las celdas **1 y 2**. Si la 2 anuncia un «REINICIO PLANIFICADO», vuelva a ejecutar 1 y 2: es normal y ocurre una sola vez.
 4. **Prueba con un solo audio.** En la celda 3 escriba parte del nombre de un audio corto en `PROBAR_SOLO`. Por ejemplo, para `2026-09-28 *Tema X - Cifras.wav` basta con `PROBAR_SOLO = 'Tema X'`. Ejecute la celda 3 y luego la 6.
@@ -92,7 +92,7 @@ Mientras 0.4.0 no esté en PyPI, el notebook la instala desde GitHub `main`: la 
 
 ## 8. Sincronizar la copia de código en Drive
 
-`Pruebas/Speakerscribe/` es una **copia de desarrollo**. GitHub `main` es la fuente de verdad. Para ponerla al día, ejecute esta celda en un Colab con Drive montado:
+`Pruebas/Speakerscribe/` es una **copia de desarrollo**. GitHub `main` es la fuente de verdad. Para ponerla al día, use la **Celda S** del notebook de publicación (sección 9). Si no lo tiene a mano, esta celda hace lo mismo en cualquier Colab con Drive montado:
 
 - No toca `data/` ni resultados.
 - Conserva sus notebooks propios.
@@ -160,15 +160,45 @@ if RESPALDO.exists():
     print(f'  Lo reemplazado quedó en: {RESPALDO}')
 ```
 
-## 9. Notebook de publicación de Drive
+## 9. Notebook de publicación
 
-Se conserva por decisión del dueño, pero sus celdas de **publicar** (`D.GitHub` y `D.PyPI`) **ya no deben usarse con este repositorio**:
+Es el notebook del dueño para publicar desde Drive en GitHub y PyPI. El 2026-10-02 se adaptó a 0.4 y quedó versionado en `notebooks/publicacion/Publicacion_GitHub_PyPI_speakerscribe.ipynb`.
 
-- Copian la carpeta de Drive **completa** sobre `main` con `git add -A`. Si Drive está desactualizado, **borran** de GitHub lo que no esté en Drive. Hoy eso sería todo `speakerscribe/batch/`.
-- Regeneran `.gitignore`. Esto dejaría volver a subir archivos de datos como `_runs.jsonl`.
-- Reescriben la línea `version` de `pyproject.toml`, que desde 0.3.1 es dinámica. Eso **rompe** la construcción del paquete.
+**Cómo obtenerlo y dónde guardarlo**
+1. Ábralo en Colab: https://colab.research.google.com/github/EnriqueForero/speakerscribe/blob/main/notebooks/publicacion/Publicacion_GitHub_PyPI_speakerscribe.ipynb
+2. Use *Archivo → Guardar una copia en Drive* y mueva la copia a la **raíz** de `Pruebas/Speakerscribe/`. Los `.ipynb` de la raíz nunca se publican, así que ahí puede cambiar banderas sin riesgo.
+3. No edite la copia de `notebooks/publicacion/`. Es la referencia que trae la Celda S.
 
-Sus celdas de consulta (árbol de carpetas, comparar versiones, estado del repositorio, descargar una versión antigua) se pueden seguir usando sin riesgo. Para publicar, use el flujo de la sección 7.
+**Flujo**
+
+| Paso | Celda | Qué hace |
+|---|---|---|
+| 1 | A | Configuración. La versión **no** se escribe: se lee de `speakerscribe/__init__.py`. |
+| 2 | B | Carga las funciones. |
+| 3 | S | Pone Drive igual a GitHub `main`. Lo que reemplaza va a `z. Backups/sync_<fecha>/`. Úsela **antes** de editar código en Drive. |
+| 4 | — | Edite el código en Drive. |
+| 5 | D.GitHub | Corre las pruebas sobre lo que se va a publicar, aplica las guardias y sube a `main`. |
+
+**Banderas de la Celda A**
+
+| Bandera | Por defecto (`False`) | Con `True` |
+|---|---|---|
+| `PUBLICAR_RELEASE` | Solo sube el código | Además crea el tag `vX.Y.Z` y `release.yml` publica en PyPI. Úsela **solo** tras una prueba exitosa. |
+| `PERMITIR_BORRADOS` | Se detiene si borraría archivos de GitHub | Permite esos borrados |
+| `PERMITIR_RETROCESOS` | Se detiene si un archivo vuelve a una versión anterior | Permite ese retroceso |
+
+**Guardias.** La publicación se detiene **sin tocar GitHub** si:
+- Drive tiene una versión menor que GitHub.
+- Borraría archivos de GitHub.
+- Un archivo de Drive es idéntico a una versión **anterior** del mismo archivo en GitHub. Esto detecta una copia vieja aunque tenga el mismo número de versión. Los notebooks se comparan por el texto de sus celdas.
+- Un notebook trae `PROBAR_SOLO` lleno (parte del nombre de una reunión real) o una bandera en `True`.
+
+**Otras protecciones**
+- Los notebooks se publican **sin salidas** de Colab. Si solo cambiaron salidas o metadatos, se conserva el de GitHub.
+- No se crean commits vacíos.
+- Se respetan el `.gitignore` y el `pyproject.toml` del repositorio, cuya versión es dinámica.
+
+Las celdas de consulta (árbol, comparar versiones, estado del repositorio, descargar una versión antigua) no cambiaron.
 
 ## 10. Glosario
 

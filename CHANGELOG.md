@@ -54,6 +54,17 @@ Versioning: [Semantic Versioning](https://semver.org/)
 - `notebooks/speakerscribe_lote.ipynb`: production notebook for the batch,
   with a single configuration cell. `notebooks/legacy/` keeps v5 as the
   characterization reference.
+- `notebooks/publicacion/Publicacion_GitHub_PyPI_speakerscribe.ipynb`: the
+  owner's Drive → GitHub → PyPI publication notebook, adapted to 0.4 and now
+  versioned. It reads the version from `__init__.py`, adds a Drive ← GitHub
+  sync cell, tags only with `PUBLICAR_RELEASE=True`, runs the tests on what
+  it publishes, strips Colab outputs, and refuses to publish a lower
+  version, deletions, older file contents or notebooks carrying local
+  values (`PROBAR_SOLO`, flags set to `True`).
+
+### Fixed
+- `tests/test_cli.py` no longer imports `click`, which typer ≥ 0.27 stopped
+  depending on.
 
 ### Changed
 - Motor profile no longer embeds the library version (`engine_semantics`
