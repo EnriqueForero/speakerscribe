@@ -164,6 +164,8 @@ module = [
     "torch.*",
     "google.colab",
     "google.colab.*",
+    "huggingface_hub",
+    "huggingface_hub.*",
     "jiwer.*",
 ]
 ignore_missing_imports = true
