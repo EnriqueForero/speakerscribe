@@ -88,6 +88,10 @@ class BatchSettings(BaseModel):
 
     # ── 4 · Descubrimiento ───────────────────────────────────────────
     recursive: bool = True
+    include_glob: str = Field(
+        "",
+        description="Solo rutas que coincidan (p. ej. '*Tres ejes*' para una prueba). '' = todas.",
+    )
     only_extensions: str = ""
     extra_extensions: str = ""
     exclude_extensions: str = ""

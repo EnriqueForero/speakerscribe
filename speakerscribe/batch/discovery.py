@@ -7,6 +7,7 @@ audio is read from Drive once instead of twice.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -114,6 +115,7 @@ def discover_sources(
     if not input_root.is_dir():
         raise FileNotFoundError(f"La carpeta de entrada no existe: {input_root}")
     accepted, probe_unknown, excluded = resolved_extensions(settings)
+    pattern = nfc(settings.include_glob.strip()).casefold()
     warnings: list[str] = []
     found: list[SourceInfo] = []
     unknown, cap_warned = 0, False
@@ -172,6 +174,8 @@ def discover_sources(
                 warnings.append(f"No se pudo inspeccionar {path}: {e}")
                 continue
             if st.st_size == 0:
+                continue
+            if pattern and not fnmatch.fnmatchcase(nfc(relative.as_posix()).casefold(), pattern):
                 continue
             found.append(
                 SourceInfo(

@@ -141,6 +141,15 @@ class TestDiscovery:
         wav = next(s for s in found.sources if s.relative_posix == "a.wav")
         assert wav.prompt_path == data / "a.prompt.txt"
 
+    def test_include_glob_limits_the_run(self, tmp_path: Path):
+        data = tmp_path / "data"
+        data.mkdir()
+        for name in ("2026-09-28 *Prueba corta.wav", "otra.wav"):
+            (data / name).write_bytes(b"x")
+        settings = make_settings(tmp_path, include_glob="*prueba CORTA*")
+        found = discover_sources(settings, data, skip_dirs=())
+        assert [s.relative_posix for s in found.sources] == ["2026-09-28 *Prueba corta.wav"]
+
     def test_parse_extensions(self):
         assert parse_extensions("ts, .MP4;wav") == {".ts", ".mp4", ".wav"}
 
