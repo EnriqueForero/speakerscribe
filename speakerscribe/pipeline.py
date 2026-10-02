@@ -46,6 +46,11 @@ from speakerscribe.config import (
     WorkspacePaths,
 )
 from speakerscribe.diarization import DiarizationEngine, diarization_params_hash
+from speakerscribe.environment import (
+    EnvironmentIncompatibleError,
+    check_audio_decoding,
+    is_environment_error,
+)
 from speakerscribe.logging_config import logger
 from speakerscribe.output import (
     generate_transcript_md,
@@ -116,6 +121,9 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
         3. GPU is available if device='cuda' was requested.
         4. There is enough free VRAM for the chosen Whisper model.
         5. A HuggingFace token is reachable when diarization is enabled.
+        6. Audio decoding actually works (1 s synthetic self-test) — the
+           check that would have stopped the PyAV 19 incident of
+           2026-10-01 before any model was loaded.
 
     Args:
         paths: WorkspacePaths with a valid workspace.
@@ -127,6 +135,7 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
     Raises:
         RuntimeError: If a blocking issue is found.
         FileNotFoundError: If the data/ folder does not exist.
+        EnvironmentIncompatibleError: If audio cannot be decoded at all.
     """
     logger.info("Pre-flight check...")
     paths.create_directories()
@@ -207,6 +216,10 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
     else:
         logger.info("   Diarization disabled — transcription only")
 
+    # 6. Decoding self-test (milliseconds; no GPU, no model)
+    decoding = check_audio_decoding(sample_rate=config.sample_rate)
+    logger.info(f"   Audio decoding: native WAV {decoding['native_wav']} · PyAV {decoding['pyav']}")
+
     return {
         "n_files": len(media),
         "total_mb": round(total_mb, 1),
@@ -217,6 +230,8 @@ def preflight_check(paths: WorkspacePaths, config: TranscriptionConfig) -> dict[
         "hf_token_ok": hf_token_ok,
         "device": resolved_device,
         "compute_type": resolved_compute,
+        "audio_decoding": {k: v for k, v in decoding.items() if k != "versions"},
+        "versions": decoding["versions"],
     }
 
 
@@ -750,6 +765,12 @@ def process_batch(
     Returns:
         List of metadata dicts, one per file
         (status: ok / ok_degraded / skipped / error).
+
+    Raises:
+        EnvironmentIncompatibleError: When a file fails with an error that
+            signals a broken environment (see `is_environment_error`). The
+            batch stops there instead of repeating the same failure — and
+            paying a full diarization — for every remaining file.
     """
     preflight_check(paths, config)
 
@@ -804,6 +825,14 @@ def process_batch(
                         "error": f"{type(e).__name__}: {e}",
                     }
                 )
+                if is_environment_error(e):
+                    logger.critical(
+                        "Environment error — stopping the batch: the same failure is "
+                        f"expected for the remaining {len(media) - i} file(s)."
+                    )
+                    raise EnvironmentIncompatibleError(
+                        f"Batch stopped after {item.name}: {type(e).__name__}: {e}"
+                    ) from e
                 continue
 
     # ── Final report

@@ -19,6 +19,12 @@ from speakerscribe.config import (
     WorkspacePaths,
 )
 from speakerscribe.diarization import DiarizationEngine, diarize_audio
+from speakerscribe.environment import (
+    EnvironmentIncompatibleError,
+    check_audio_decoding,
+    is_environment_error,
+    package_versions,
+)
 from speakerscribe.pipeline import preflight_check, process_batch, process_one
 from speakerscribe.quality import evaluate_transcription_quality
 from speakerscribe.transcription import (
@@ -27,7 +33,7 @@ from speakerscribe.transcription import (
     release_whisper_model,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "FILLERS_AGGRESSIVE",
@@ -35,13 +41,17 @@ __all__ = [
     "SPK_NO_DIARIZATION",
     "SPK_NO_OVERLAP",
     "DiarizationEngine",
+    "EnvironmentIncompatibleError",
     "TranscriptionConfig",
     "WorkspacePaths",
     "__version__",
+    "check_audio_decoding",
     "diarize_audio",
     "evaluate_transcription_quality",
+    "is_environment_error",
     "load_whisper_model",
     "loaded_whisper",
+    "package_versions",
     "preflight_check",
     "process_batch",
     "process_one",

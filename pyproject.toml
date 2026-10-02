@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speakerscribe"
-version = "0.3.0"
+dynamic = ["version"]  # single source of truth: speakerscribe/__init__.py
 description = "Speech-to-text with speaker diarization — Whisper + pyannote.audio, optimized for Google Colab Free Tier (T4 GPU)."
 readme = "README.md"
 license = {text = "MIT"}
@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -30,6 +31,13 @@ classifiers = [
 ]
 dependencies = [
     "faster-whisper>=1.2.1,<2.0",
+    # PyAV 19.0.0 (2026-09-29) removed av.open(metadata_errors=...), which
+    # faster-whisper 1.2.1 still passes. The fix (SYSTRAN/faster-whisper#1495)
+    # is merged but unreleased. Lift this cap only when the minimum
+    # faster-whisper version includes that fix. speakerscribe itself reads
+    # its WAVs without PyAV since 0.3.1 (defense in depth).
+    "av>=11,<19",
+    "numpy>=1.24",
     "pyannote.audio>=4.0,<5.0",
     "pydantic>=2.5,<3.0",
     "loguru>=0.7,<1.0",
@@ -40,9 +48,10 @@ dependencies = [
 [project.optional-dependencies]
 bench = [
     "jiwer>=3.0,<5.0",
-    "pyannote.metrics>=3.2,<4.0",
+    # pyannote.audio 4.x requires pyannote-metrics>=4.0; <4.0 was unresolvable.
+    "pyannote.metrics>=4.0,<5.0",
 ]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-mock>=3.12", "ruff>=0.9.0", "mypy>=1.10"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-mock>=3.12", "ruff==0.9.0", "mypy>=1.10"]
 
 [project.scripts]
 speakerscribe = "speakerscribe.cli:app"
@@ -62,6 +71,9 @@ exclude = ["tests*", "notebooks*", "docs*"]
 [tool.setuptools.package-data]
 "speakerscribe" = ["py.typed"]
 
+[tool.setuptools.dynamic]
+version = {attr = "speakerscribe.__version__"}
+
 
 # ═══════════════════════════════════════════════════════════
 # Pytest
@@ -69,7 +81,7 @@ exclude = ["tests*", "notebooks*", "docs*"]
 [tool.pytest.ini_options]
 testpaths    = ["tests"]
 python_files = ["test_*.py"]
-addopts      = "-v --tb=short --strict-markers --cov=speakerscribe --cov-report=term-missing --cov-report=xml --cov-fail-under=45"
+addopts      = "-v --tb=short --strict-markers --cov=speakerscribe --cov-report=term-missing --cov-fail-under=45"
 markers = [
     "integration: end-to-end tests that download models / need ffmpeg (CI: scheduled job)",
     "gpu: tests requiring CUDA",
@@ -85,9 +97,6 @@ branch = true
 source = ["speakerscribe"]
 omit = [
     "*/tests/*",
-    "*/dashboard.py",
-    "*/visualizacion*.py",
-    "*/visualizacion_interactiva.py",
     "*/__main__.py",
 ]
 

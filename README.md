@@ -38,23 +38,13 @@ The notebook handles everything: installation, Google Drive mounting, HF token s
 ## Installation
 
 ```bash
-pip install speakerscribe
+pip install "speakerscribe>=0.3.1"
 ```
 
-> **Requires Python ≥ 3.10.** On Colab, install with the preinstalled
-> environment frozen as constraints — no runtime restart needed:
->
-> ```python
-> import subprocess, sys
-> pins = [l for l in subprocess.run([sys.executable, "-m", "pip", "freeze"],
->         capture_output=True, text=True).stdout.splitlines()
->         if l and not l.startswith(("-e ", "#")) and "@" not in l]
-> open("/tmp/colab-pins.txt", "w").write("\n".join(pins))
-> %pip install -q -c /tmp/colab-pins.txt speakerscribe
-> ```
->
-> If pip reports an unresolvable conflict it fails HERE (fast and visible);
-> run the notebook's diagnostic cell and only restart if it says so.
+> **Requires Python ≥ 3.10** (tested on 3.10–3.13; Google Colab runs 3.13).
+> Since 0.3.1 the package caps `av<19`: PyAV 19.0.0 removed an argument that
+> faster-whisper 1.2.1 still uses. If pip downgrades already-imported
+> binaries (numpy/torch) in a running Colab session, restart the runtime once.
 
 ### HuggingFace token (required for diarization)
 

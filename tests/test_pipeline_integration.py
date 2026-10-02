@@ -1,7 +1,7 @@
 """End-to-end integration: REAL audio -> REAL faster-whisper (tiny, CPU).
 
-Marked `integration`: excluded from the default unit run. CI executes this
-in a scheduled job that installs the full stack and espeak-ng. It exists
+Marked `integration`: excluded from the default unit run. CI runs this
+in the `integration` job (Python 3.11 and 3.13) with ffmpeg and espeak-ng. It exists
 because the unit suite, by design, never exercises the real decoder — this
 is the test that would have caught a broken faster-whisper pin or a kwargs
 mismatch against the real `transcribe()` signature.
@@ -10,6 +10,7 @@ mismatch against the real `transcribe()` signature.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 
@@ -34,6 +35,8 @@ SPOKEN_TEXT = (
 def real_workspace(tmp_path_factory):
     """Workspace with ~10 s of synthesized Spanish speech."""
     if shutil.which("espeak-ng") is None or shutil.which("ffmpeg") is None:
+        if os.environ.get("CI"):
+            pytest.fail("espeak-ng and ffmpeg must be installed in CI (see ci.yml)")
         pytest.skip("espeak-ng/ffmpeg not available")
     ws = tmp_path_factory.mktemp("integration_ws")
     paths = WorkspacePaths(workspace=ws, scratch=str(ws / "scratch"))
