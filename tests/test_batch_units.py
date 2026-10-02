@@ -209,6 +209,19 @@ class TestJournal:
         assert JournalIndex.build(log).attempts == {}
 
 
+class TestUnfinishedSignatures:
+    def test_attempted_but_never_published_content_is_protected(self):
+        from speakerscribe.batch.journal import unfinished_signatures
+
+        log = [
+            {"event": "failed_retryable", "source": {"id": "old-root", "content_signature": "A"}},
+            {"event": "processing", "source": {"id": "x", "content_signature": "B"}},
+            {"event": "completed", "source": {"id": "y", "content_signature": "B"}},
+            {"event": "failed_environment", "source": {"id": "z", "content_signature": "C"}},
+        ]
+        assert unfinished_signatures(log) == {"A", "C"}
+
+
 class TestLock:
     def test_second_owner_is_refused_and_stale_lock_is_taken(self, tmp_path: Path):
         path = tmp_path / "lock.json"

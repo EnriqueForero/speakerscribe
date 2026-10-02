@@ -522,3 +522,24 @@ class TestSafetyNets:
         report, _ = run(root, FakeEngine())
         assert report.ok == 1 and report.plan.get("error_planificacion") == 1
         assert report.end_reason == "completo"
+
+
+class TestFilteredRun:
+    def test_include_glob_processes_one_file_and_never_prunes_caches(self, root: Path):
+        import os
+        import time as _time
+
+        write_audio(root, "prueba corta.wav", b"AUDIO-1")
+        write_audio(root, "otro.wav", b"AUDIO-2")
+        cache = root / "entregables/.speakerscribe_state/diar_cache"
+        cache.mkdir(parents=True)
+        old = cache / "deadbeef_x.diar.json"
+        old.write_text("{}")
+        os.utime(old, (_time.time() - 200 * 86400,) * 2)
+        engine = FakeEngine()
+        report, _ = run(root, engine, include_glob="*CORTA*")
+        assert report.ok == 1 and len(engine.calls) == 1
+        assert (root / "data" / "otro.wav").exists()
+        assert old.exists(), "a filtered run cannot know which caches are still needed"
+        run(root, FakeEngine())
+        assert not old.exists(), "a full run prunes caches older than 90 days"

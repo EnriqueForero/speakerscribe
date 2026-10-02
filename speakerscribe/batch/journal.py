@@ -184,6 +184,31 @@ class JournalIndex:
         return None
 
 
+def unfinished_signatures(events: list[dict[str, Any]]) -> set[str]:
+    """Content signatures that were attempted but never published.
+
+    Keyed on content, not location, so it survives a workspace rebind (the
+    source ids change, the bytes do not). Their diarization caches are
+    still worth keeping.
+    """
+    attempted: set[str] = set()
+    done: set[str] = set()
+    for rec in events:
+        signature = (rec.get("source") or {}).get("content_signature")
+        if not signature:
+            continue
+        if rec.get("event") in SUCCESS_EVENTS:
+            done.add(str(signature))
+        elif rec.get("event") in {
+            Event.PROCESSING.value,
+            Event.FAILED_RETRYABLE.value,
+            Event.FAILED_ENVIRONMENT.value,
+            Event.QUALITY_REJECTED.value,
+        }:
+            attempted.add(str(signature))
+    return attempted - done
+
+
 def previous_input_roots(events: list[dict[str, Any]]) -> set[str]:
     """``input_root_sha256`` of every recorded ``batch_started``."""
     roots = {
@@ -203,4 +228,5 @@ __all__ = [
     "Journal",
     "JournalIndex",
     "previous_input_roots",
+    "unfinished_signatures",
 ]

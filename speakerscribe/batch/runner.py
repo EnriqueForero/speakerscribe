@@ -51,7 +51,13 @@ from speakerscribe.batch.guards import (
     shutdown_decision,
 )
 from speakerscribe.batch.identity import SourceInfo, bind_workspace, root_id, source_payload
-from speakerscribe.batch.journal import Event, Journal, JournalIndex, previous_input_roots
+from speakerscribe.batch.journal import (
+    Event,
+    Journal,
+    JournalIndex,
+    previous_input_roots,
+    unfinished_signatures,
+)
 from speakerscribe.batch.layout import DeliverableLayout, OutputNamer
 from speakerscribe.batch.locking import LockError, StateLock
 from speakerscribe.batch.masters import MasterStore
@@ -326,18 +332,23 @@ class BatchRunner:
                 info["procesados_purgados"] = purge_processed(
                     paths.processed, s.processed_retention_days, journal
                 )
-            protected = {
-                str((e.get("source") or {}).get("content_signature"))
-                for e in events
-                if (e.get("source") or {}).get("id") in current
-            }
-            info["diar_cache_podados"] = prune_diar_cache(
-                paths.diar_cache,
-                s.diar_cache_retention_days,
-                journal,
-                protected,
-                now=self.deps.wall(),
-            )
+            if s.include_glob:
+                # A filtered run only sees part of data/: it cannot tell which
+                # caches still belong to pending files, so it never prunes.
+                info["diar_cache_podados"] = 0
+            else:
+                protected = unfinished_signatures(events) | {
+                    str((e.get("source") or {}).get("content_signature"))
+                    for e in events
+                    if (e.get("source") or {}).get("id") in current
+                }
+                info["diar_cache_podados"] = prune_diar_cache(
+                    paths.diar_cache,
+                    s.diar_cache_retention_days,
+                    journal,
+                    protected,
+                    now=self.deps.wall(),
+                )
         except OSError as e:
             session.report.warnings.append(f"Mantenimiento omitido: {sanitize_error(e)}")
         session.report.housekeeping = info
