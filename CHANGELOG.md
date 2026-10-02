@@ -7,6 +7,60 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.4.0] — 2026-10-02
+
+> New `speakerscribe.batch`: the resumable Google Drive + Colab batch that
+> lived in a ~3,700-line notebook (v5) is now a tested package. The notebook
+> becomes one configuration cell plus one call.
+
+### Added
+- **`speakerscribe.batch`** (`BatchSettings`, `run_batch`, `BatchRunner`):
+  - One validated, immutable `BatchSettings` (pydantic, `extra="forbid"`)
+    replaces ~70 loose globals. Every folder derives from one `root`:
+    `data/`, `entregables/` (canonical `.txt` + `.speakerscribe_state/`),
+    `transcripts/` (md/srt/json/plain), `splits/` (LLM text),
+    `_procesados/YYYY-MM-DD/`.
+  - Transactional journal compatible with v5. Same `events.jsonl`,
+    `prepared`→`completed` commits, recovery of interrupted commits, lock
+    with heartbeat, master JSON and diarization-cache key. The 463 events
+    and 100 caches produced by v5 index without changes (characterization
+    tests run against the frozen v5 notebook).
+  - Output names keep the audio name exactly, including the leading `*`
+    (v5 replaced it with `_`). A file already in `entregables/` that the
+    batch did not write is never overwritten.
+  - A deliverable you moved, renamed or edited is respected and reported
+    (`on_output_changed="report"`). v5 silently re-ran the GPU and
+    overwrote it.
+  - Retention: after a verified `ok`, the audio moves to
+    `_procesados/<date>/` and is purged after `processed_retention_days`
+    (30). Diarization cache pruned after `diar_cache_retention_days` (90).
+    Every move and purge is journaled.
+  - Environment failures (`failed_environment`) never consume retry
+    attempts. Two identical ones in a row stop the batch (circuit
+    breaker), and the VM is never shut down when a run failed without
+    producing anything.
+  - Each audio is read from Drive once: copied to local disk while being
+    hashed.
+  - The diarization result is persisted even when ASR fails afterwards, so
+    a retry only pays for ASR.
+  - Operator tools without GPU: `status`, `published`, `rename_speakers`,
+    `rebind_workspace` (audited move of the input folder), `autopsy`.
+- `DiarizationEngine.load()` and `.is_loaded` (validate HF access before
+  loading Whisper).
+- `notebooks/speakerscribe_lote.ipynb`: production notebook for the batch,
+  with a single configuration cell. `notebooks/legacy/` keeps v5 as the
+  characterization reference.
+
+### Changed
+- Motor profile no longer embeds the library version (`engine_semantics`
+  instead), so routine upgrades do not re-trigger the profile-change policy.
+- Strict render tolerates up to `monotonic_tolerance_s` (1.0 s) of boundary
+  drift; v5 rejected at 0.05 s.
+- Learned RTF uses the 100 most recent observations. v5 sorted first and
+  kept the fastest 100, which biased estimates upwards.
+
+---
+
 ## [0.3.1] — 2026-10-02
 
 > Hotfix: every transcription failed on fresh installs since PyAV 19.0.0

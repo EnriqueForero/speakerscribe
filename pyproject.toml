@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "speakerscribe"
 dynamic = ["version"]  # single source of truth: speakerscribe/__init__.py
 description = "Speech-to-text with speaker diarization — Whisper + pyannote.audio, optimized for Google Colab Free Tier (T4 GPU)."
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     {name = "Néstor Enrique Forero Herrera", email = "enrique.economista@gmail.com"},
@@ -18,7 +19,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -162,6 +162,7 @@ module = [
     "faster_whisper.*",
     "pyannote.*",
     "torch.*",
+    "google.colab",
     "google.colab.*",
     "jiwer.*",
 ]

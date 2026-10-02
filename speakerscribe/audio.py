@@ -220,7 +220,7 @@ def read_wav_float32(path: Path, *, expected_sample_rate: int = 16_000) -> np.nd
                     f"channels={channels} sampwidth={width} rate={rate} comp={compression}"
                 )
             n_frames = reader.getnframes()
-            out = np.empty(n_frames, dtype=np.float32)
+            out: np.ndarray = np.empty(n_frames, dtype=np.float32)
             filled = 0
             while filled < n_frames:
                 raw = reader.readframes(min(_WAV_READ_BLOCK_FRAMES, n_frames - filled))

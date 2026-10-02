@@ -86,3 +86,22 @@ class TestDiarizationParamsHash:
             TranscriptionConfig(model="large-v3-turbo", beam_size=1, num_speakers=3)
         )
         assert h1 == h2
+
+
+class TestEngineLoadApi:
+    def test_load_validates_eagerly_and_is_loaded_tracks_state(self, monkeypatch):
+        from speakerscribe.config import TranscriptionConfig
+        from speakerscribe.diarization import DiarizationEngine
+
+        engine = DiarizationEngine(TranscriptionConfig())
+        assert engine.is_loaded is False
+
+        def fake_load(self):
+            self._pipeline = object()
+            return self._pipeline
+
+        monkeypatch.setattr(DiarizationEngine, "_ensure_loaded", fake_load)
+        engine.load()
+        assert engine.is_loaded is True
+        engine.close()
+        assert engine.is_loaded is False
