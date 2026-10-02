@@ -1,0 +1,182 @@
+# Guía del lote de transcripción (transferencia de conocimiento)
+
+Para quien opera o mantiene el lote de Drive + Colab. Primero cubre lo esencial y al final los detalles. Lo que se hizo y por qué está en [BITACORA.md](BITACORA.md).
+
+## 1. Qué hace, en una frase
+
+Toma cada audio o video de `data/` y deja un `.txt` con quién habló y cuándo, **con el mismo nombre del audio**. Si la sesión de Colab se corta, la siguiente ejecución sigue donde quedó, sin repetir nada.
+
+## 2. Las carpetas
+
+Todo cuelga de una raíz en Drive: `ProColombia/1B. Resultados/Transcripcion-Diarizacion/`.
+
+| Carpeta | Qué hay | ¿La toco? |
+|---|---|---|
+| `data/` | Los audios por transcribir | ✅ Aquí deja los audios nuevos |
+| `entregables/` | Un `.txt` por grabación y el resumen `_resumen.md` | ✅ Puede renombrarlos o editarlos; el lote lo respeta |
+| `entregables/.speakerscribe_state/` | La memoria del lote: registro, cachés y copias maestras | ❌ No borrar ni editar |
+| `transcripts/` | Formatos opcionales: `.srt`, `.md`, `.json` | Opcional |
+| `splits/` | Texto corrido para pegar en un LLM (`.full_for_llm.txt`) | ✅ |
+| `_procesados/AAAA-MM-DD/` | Audios ya transcritos con éxito; se borran solos a los 30 días | Puede recuperar un audio desde aquí |
+
+## 3. Uso normal (cada vez)
+
+1. Ponga los audios en `data/`.
+2. Abra `notebooks/speakerscribe_lote.ipynb` en Colab con GPU T4 y use *Entorno de ejecución → Ejecutar todo*.
+3. Al terminar, la máquina se apaga sola. Los resultados quedan en `entregables/` y `splits/`.
+
+Solo se edita la **celda 3** (configuración).
+
+## 4. Primera vez después de esta actualización
+
+1. Abra el notebook nuevo: https://colab.research.google.com/github/EnriqueForero/speakerscribe/blob/main/notebooks/speakerscribe_lote.ipynb y guarde una copia en su Drive.
+2. Confirme que el secreto `HF_TOKEN` (🔑) tiene acceso al notebook.
+3. Ejecute las celdas **1 y 2**. Si la 2 anuncia un «REINICIO PLANIFICADO», vuelva a ejecutar 1 y 2: es normal y ocurre una sola vez.
+4. **Prueba con un solo audio.** En la celda 3 escriba parte del nombre de un audio corto en `PROBAR_SOLO`. Por ejemplo, para `2026-09-28 *Tema X - Cifras.wav` basta con `PROBAR_SOLO = 'Tema X'`. Ejecute la celda 3 y luego la 6.
+   - **La primera vez la celda 6 se detiene** con «El estado está vinculado a OTRA carpeta de entrada». Es esperado: `data/` cambió de lugar. En la celda 4 ponga `REVINCULAR = True`, ejecútela **una vez** y vuelva a dejarla en `False`. Después ejecute otra vez la celda 6.
+5. Revise el `.txt` en `entregables/`: hablantes, tiempos y texto.
+6. **Lote completo.** Deje `PROBAR_SOLO = ''` y use *Ejecutar todo*.
+
+### Qué es `PROBAR_SOLO`
+Es un filtro por nombre:
+- `''` (vacío) procesa **todo** `data/`.
+- Un texto procesa **solo** los audios cuyo nombre **contiene** ese texto, sin distinguir mayúsculas.
+
+En modo prueba la máquina **no** se apaga al final, para que pueda revisar. Los demás audios siguen en `data/` para la corrida completa.
+
+## 5. Qué esperar y qué hacer si algo pasa
+
+| Situación | Qué hace el lote | Qué hace usted |
+|---|---|---|
+| Colab corta la sesión | Lo confirmado está a salvo; el archivo en curso se rehace | Vuelva a ejecutar todo |
+| Error de entorno (librerías, CUDA, token) | Se detiene sin gastar intentos; la máquina **no** se apaga | Ejecute la celda 8 (autopsia) y comparta la salida |
+| La diarización falla en un archivo | Lo reintenta en la siguiente sesión; en el último intento lo publica **marcado** | Revise `pendientes_revision.json` |
+| Usted renombró o editó un `.txt` (p. ej. quitó el `*`) | Lo respeta y lo informa; no lo regenera | Nada |
+| Ya existe un archivo con ese nombre en `entregables/` que el lote no creó | El nuevo sale como `nombre~<id>.txt`; el suyo queda intacto | Nada |
+| RAM alta | Al 70 % recicla modelos; al 88 % cierra limpio | Reinicie la sesión y ejecute de nuevo |
+| El mismo audio en dos lugares | Se transcribe una vez y la otra copia se reutiliza sin GPU | Nada |
+| Quiere nombres reales en vez de SPEAKER_00 | — | Celda 7 (renombrar hablantes, sin GPU) |
+
+## 6. Cómo funciona por dentro (lo mínimo para mantenerlo)
+
+- **Registro (journal):** `events.jsonl` anota cada paso. Un resultado solo cuenta como hecho cuando queda escrito `completed`. Por eso una sesión cortada nunca deja un `.txt` a medias.
+- **Copia maestra:** `intermedios/<id>.json.gz` guarda el resultado crudo. Cambiar formatos o nombres de hablantes se resuelve **sin GPU** desde esa copia.
+- **Caché de diarización:** si el ASR falla después de diarizar, la diarización queda guardada y el reintento solo paga el ASR.
+- **Perfiles:**
+  - El de **motor** (modelo, idioma, beam, hablantes, glosario) cuesta GPU si cambia.
+  - El de **presentación** (formatos, encabezado) se aplica sin GPU.
+- **Código:** `speakerscribe/batch/` en GitHub. Mapa de módulos en [ARCHITECTURE.md](ARCHITECTURE.md#batch-package).
+
+## 7. Publicar una versión en PyPI
+
+Regla del proyecto: **se publica solo después de una prueba exitosa en Colab**.
+
+**Una sola vez (dueño del proyecto):**
+1. En https://pypi.org/manage/project/speakerscribe/settings/publishing/ agregue un *trusted publisher* de GitHub con estos datos:
+   - owner: `EnriqueForero`
+   - repository: `speakerscribe`
+   - workflow: `release.yml`
+   - environment: `pypi`
+2. En GitHub, en *Settings → Environments → New environment*, cree el entorno `pypi`.
+
+**Cada versión:**
+1. La versión vive **solo** en `speakerscribe/__init__.py` (`__version__`), y el CHANGELOG debe tener su sección.
+2. Con `main` en verde, se empuja el tag `vX.Y.Z`, por ejemplo `v0.4.0`.
+3. `release.yml` hace el resto:
+   - verifica que el tag coincida con la versión;
+   - construye el paquete;
+   - publica en PyPI sin tokens;
+   - crea el *Release* de GitHub.
+
+Mientras 0.4.0 no esté en PyPI, el notebook la instala desde GitHub `main`: la celda 2 lo hace sola.
+
+## 8. Sincronizar la copia de código en Drive
+
+`Pruebas/Speakerscribe/` es una **copia de desarrollo**. GitHub `main` es la fuente de verdad. Para ponerla al día, ejecute esta celda en un Colab con Drive montado:
+
+- No toca `data/` ni resultados.
+- Conserva sus notebooks propios.
+- Todo lo que reemplaza lo mueve a `z. Backups/sync_<fecha>/`; nada se borra.
+- Ejecutarla dos veces no cambia nada la segunda vez.
+
+```python
+# 🟡 Sincronizar la copia de desarrollo en Drive con GitHub (main)
+import datetime
+import filecmp
+import shutil
+import subprocess
+from pathlib import Path
+
+DESTINO = Path('/content/drive/MyDrive/Pruebas/Speakerscribe')   # ⇦ su carpeta de código en Drive
+REPO = 'https://github.com/EnriqueForero/speakerscribe'
+TMP = Path('/content/ss_repo')
+RESPALDO = DESTINO / 'z. Backups' / f'sync_{datetime.datetime.now():%Y%m%d_%H%M%S}'
+ESPEJO = ('speakerscribe', 'tests', 'docs', 'scripts', '.github')   # quedan idénticas a GitHub
+SOLO_AGREGAR = ('notebooks',)                                         # se conservan sus notebooks propios
+
+
+def _respaldar(ruta):
+    destino = RESPALDO / ruta.relative_to(DESTINO)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(ruta), str(destino))
+
+
+def _copiar(origen, destino):
+    cambios = 0
+    for archivo in origen.rglob('*'):
+        if archivo.is_dir() or '__pycache__' in archivo.parts:
+            continue
+        objetivo = destino / archivo.relative_to(origen)
+        if objetivo.exists() and filecmp.cmp(archivo, objetivo, shallow=False):
+            continue
+        if objetivo.exists():
+            _respaldar(objetivo)
+        objetivo.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(archivo, objetivo)
+        cambios += 1
+    return cambios
+
+
+shutil.rmtree(TMP, ignore_errors=True)
+subprocess.run(['git', 'clone', '--depth', '1', '--quiet', REPO, str(TMP)], check=True)
+total = sobrantes = 0
+for carpeta in (*ESPEJO, *SOLO_AGREGAR):
+    total += _copiar(TMP / carpeta, DESTINO / carpeta)
+for carpeta in ESPEJO:  # lo que ya no existe en GitHub va al respaldo (no se borra)
+    for archivo in sorted((DESTINO / carpeta).rglob('*'), reverse=True):
+        if archivo.is_file() and not (TMP / carpeta / archivo.relative_to(DESTINO / carpeta)).exists():
+            _respaldar(archivo)
+            sobrantes += 1
+for archivo in TMP.iterdir():  # raíz: pyproject.toml, README.md, CHANGELOG.md…
+    objetivo = DESTINO / archivo.name
+    if archivo.is_file() and not (objetivo.exists() and filecmp.cmp(archivo, objetivo, shallow=False)):
+        if objetivo.exists():
+            _respaldar(objetivo)
+        shutil.copy2(archivo, objetivo)
+        total += 1
+version = (TMP / 'speakerscribe' / '__init__.py').read_text().split('__version__ = "')[1].split('"')[0]
+print(f'✔ Drive = GitHub main (v{version}): {total} actualizado(s), {sobrantes} obsoleto(s) movido(s).')
+if RESPALDO.exists():
+    print(f'  Lo reemplazado quedó en: {RESPALDO}')
+```
+
+## 9. Notebook de publicación de Drive
+
+Se conserva por decisión del dueño, pero sus celdas de **publicar** (`D.GitHub` y `D.PyPI`) **ya no deben usarse con este repositorio**:
+
+- Copian la carpeta de Drive **completa** sobre `main` con `git add -A`. Si Drive está desactualizado, **borran** de GitHub lo que no esté en Drive. Hoy eso sería todo `speakerscribe/batch/`.
+- Regeneran `.gitignore`. Esto dejaría volver a subir archivos de datos como `_runs.jsonl`.
+- Reescriben la línea `version` de `pyproject.toml`, que desde 0.3.1 es dinámica. Eso **rompe** la construcción del paquete.
+
+Sus celdas de consulta (árbol de carpetas, comparar versiones, estado del repositorio, descargar una versión antigua) se pueden seguir usando sin riesgo. Para publicar, use el flujo de la sección 7.
+
+## 10. Glosario
+
+| Término | Significado |
+|---|---|
+| Diarización | Saber **quién** habla y cuándo (pyannote) |
+| ASR | Pasar voz a texto (Whisper) |
+| RTF | Veces más rápido que el tiempo real (RTF 20 = 1 h de audio en 3 min) |
+| Revincular | Decirle al lote que la carpeta `data/` cambió de lugar a propósito |
+| Marcado / con flags | Se publicó con advertencias de calidad; revise el encabezado `estado:` del `.txt` |
+| Trusted publisher | Permiso de PyPI para que GitHub Actions publique sin contraseñas ni tokens |

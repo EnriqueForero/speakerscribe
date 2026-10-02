@@ -55,6 +55,8 @@ parts) · `_procesados/YYYY-MM-DD/` (audio already transcribed; purged after
 30 days). Every state change is journaled; a killed session loses at most
 the file in progress. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#batch-package).
 
+Operating guide (Spanish): [docs/GUIA_LOTE.md](docs/GUIA_LOTE.md) · project log: [docs/BITACORA.md](docs/BITACORA.md).
+
 ---
 
 ## Installation

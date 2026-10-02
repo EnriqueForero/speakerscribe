@@ -45,7 +45,10 @@ Versioning: [Semantic Versioning](https://semver.org/)
     a retry only pays for ASR.
   - Operator tools without GPU: `status`, `published`, `rename_speakers`,
     `rebind_workspace` (audited move of the input folder), `autopsy`.
-  - `include_glob` limits a run to matching paths (one-file smoke test).
+  - `include_glob` limits a run to matching paths (one-file smoke test); the
+    notebook exposes it as `PROBAR_SOLO` (plain "name contains" text).
+- `docs/GUIA_LOTE.md` (operation and knowledge transfer, Spanish) and
+  `docs/BITACORA.md` (project log with decisions and evidence).
 - `DiarizationEngine.load()` and `.is_loaded` (validate HF access before
   loading Whisper).
 - `notebooks/speakerscribe_lote.ipynb`: production notebook for the batch,
