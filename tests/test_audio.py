@@ -194,3 +194,70 @@ class TestSplitLongAudio:
     def test_missing_input_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             split_long_audio(tmp_path / "no.wav", tmp_path / "c")
+
+
+class TestReadWavFloat32:
+    """Native PCM16 reader: removes PyAV from the transcription path (0.3.1)."""
+
+    @staticmethod
+    def _write(path, samples, *, rate=16_000, channels=1, width=2):
+        import wave
+
+        import numpy as np
+
+        data = np.asarray(samples, dtype="<i2")
+        if channels == 2:
+            data = np.repeat(data, 2)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(channels)
+            w.setsampwidth(width)
+            w.setframerate(rate)
+            w.writeframes(data.tobytes() if width == 2 else bytes(len(data)))
+        return path
+
+    def test_exact_int16_scaling(self, tmp_path):
+        import numpy as np
+
+        from speakerscribe.audio import read_wav_float32
+
+        pcm = np.array([0, 1, -1, 32767, -32768, 12345, -54], dtype=np.int16)
+        out = read_wav_float32(self._write(tmp_path / "a.wav", pcm))
+        assert out.dtype == np.float32
+        np.testing.assert_array_equal(out, pcm.astype(np.float32) / 32768.0)
+
+    def test_multi_block_read_matches_single_shot(self, tmp_path, monkeypatch):
+        import numpy as np
+
+        from speakerscribe import audio as audio_mod
+
+        rng = np.random.default_rng(42)
+        pcm = rng.integers(-32768, 32767, size=10_007, dtype=np.int16)
+        path = self._write(tmp_path / "b.wav", pcm)
+        monkeypatch.setattr(audio_mod, "_WAV_READ_BLOCK_FRAMES", 1_000)
+        out = audio_mod.read_wav_float32(path)
+        np.testing.assert_array_equal(out, pcm.astype(np.float32) / 32768.0)
+
+    @pytest.mark.parametrize(
+        ("rate", "channels", "width"),
+        [(44_100, 1, 2), (16_000, 2, 2), (16_000, 1, 1)],
+    )
+    def test_rejects_other_formats(self, tmp_path, rate, channels, width):
+        from speakerscribe.audio import UnsupportedWavFormatError, read_wav_float32
+
+        path = self._write(tmp_path / "c.wav", [0] * 100, rate=rate, channels=channels, width=width)
+        with pytest.raises(UnsupportedWavFormatError):
+            read_wav_float32(path)
+
+    def test_rejects_non_wav_bytes(self, tmp_path):
+        from speakerscribe.audio import UnsupportedWavFormatError, read_wav_float32
+
+        path = tmp_path / "fake.wav"
+        path.write_bytes(b"not a riff file at all")
+        with pytest.raises(UnsupportedWavFormatError):
+            read_wav_float32(path)
+
+    def test_missing_file(self, tmp_path):
+        from speakerscribe.audio import read_wav_float32
+
+        with pytest.raises(FileNotFoundError):
+            read_wav_float32(tmp_path / "nope.wav")

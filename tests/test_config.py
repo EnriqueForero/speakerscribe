@@ -264,3 +264,11 @@ class TestConstants:
         for lang in ("es", "en", "pt", "fr"):
             assert lang in FILLER_WORDS
             assert len(FILLER_WORDS[lang]) > 0
+
+
+def test_workspace_paths_rejects_unknown_fields(tmp_path):
+    """An unknown kwarg must fail loudly instead of silently using defaults."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        WorkspacePaths(workspace=tmp_path, transcripts=str(tmp_path / "elsewhere"))

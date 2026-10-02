@@ -19,6 +19,21 @@ Speaker attribution:
     (see `diarization.assign_speakers_by_words`). `"segment"` reproduces
     the legacy one-speaker-per-segment behavior.
 
+Audio input (new in 0.3.1):
+    The 16 kHz mono PCM16 WAV produced by `extract_audio_wav` is read with
+    the standard library (`audio.read_wav_float32`) and handed to
+    faster-whisper as a numpy array. faster-whisper then never calls PyAV,
+    which removes the dependency that broke every transcription when PyAV
+    19.0.0 dropped `av.open(metadata_errors=...)`. Any other input
+    (non-PCM16, other sample rates) falls back to the file path.
+
+Segment boundaries (new in 0.3.1):
+    Word-level DTW alignment sometimes stamps the last words of a Whisper
+    segment slightly AFTER the start of the next segment (observed: 0.39 to
+    0.85 s on real meetings). The writer clamps such sub-second overlaps so
+    emitted timestamps are monotonic and SRT cues never overlap; larger
+    overlaps are left untouched and counted.
+
 Two transcription paths:
     transcribe_streaming  — Single audio file (any duration; batched mode
                             handles long audio natively via its VAD).
@@ -39,7 +54,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any
 
-from speakerscribe.audio import AudioChunk, format_srt_timestamp
+from speakerscribe.audio import (
+    AudioChunk,
+    UnsupportedWavFormatError,
+    format_srt_timestamp,
+    read_wav_float32,
+)
 from speakerscribe.config import (
     WHISPER_PROMPT_TOKEN_LIMIT,
     TranscriptionConfig,
@@ -57,6 +77,16 @@ if TYPE_CHECKING:
 # Heuristic chars-per-token for es/en prose, used only to WARN about prompt
 # budget without importing the tokenizer eagerly.
 _APPROX_CHARS_PER_TOKEN = 4
+
+WHISPER_SAMPLE_RATE = 16_000
+"""faster-whisper's feature extractor rate; arrays must be sampled at it."""
+
+BOUNDARY_OVERLAP_CLAMP_S = 1.0
+"""Max overlap (s) between consecutive display segments that is clamped.
+
+Overlaps up to this size come from word-alignment drift at Whisper segment
+boundaries; larger ones are left as-is (they signal a real problem and are
+counted in `timestamps_unclamped_overlaps`)."""
 
 
 def load_whisper_model(config: TranscriptionConfig) -> WhisperModel:
@@ -239,9 +269,31 @@ def _build_transcribe_kwargs(
     }
 
 
+def _load_audio_input(audio_path: Path, sample_rate: int) -> Any:
+    """Return what faster-whisper should decode: a float32 array or a path.
+
+    PCM16 mono WAVs at Whisper's rate are read natively (no PyAV); anything
+    else is passed as a path so faster-whisper decodes it as before.
+
+    Args:
+        audio_path: Audio file produced by the pipeline (normally a WAV).
+        sample_rate: Configured sampling rate of that WAV.
+
+    Returns:
+        numpy float32 array, or `str(audio_path)` for the PyAV fallback.
+    """
+    if sample_rate != WHISPER_SAMPLE_RATE:
+        return str(audio_path)
+    try:
+        return read_wav_float32(audio_path, expected_sample_rate=WHISPER_SAMPLE_RATE)
+    except (UnsupportedWavFormatError, FileNotFoundError) as e:
+        logger.debug(f"Native WAV read not applicable ({e}); faster-whisper decodes the file")
+        return str(audio_path)
+
+
 def _launch_transcription(
     model: WhisperModel,
-    audio_path: Path,
+    audio: Any,
     kwargs: dict[str, Any],
     batch_size: int,
 ) -> tuple[Any, Any]:
@@ -250,13 +302,19 @@ def _launch_transcription(
     `BatchedInferencePipeline.transcribe` is a drop-in for
     `WhisperModel.transcribe` (same lazy segment generator, same kwargs):
     https://github.com/SYSTRAN/faster-whisper#batched-transcription
+
+    Args:
+        model: Loaded WhisperModel.
+        audio: float32 array at 16 kHz (preferred) or a file path string.
+        kwargs: Decoding options.
+        batch_size: 1 = sequential path; >1 = batched pipeline.
     """
     if batch_size > 1:
         from faster_whisper import BatchedInferencePipeline
 
         pipe = BatchedInferencePipeline(model=model)
-        return pipe.transcribe(str(audio_path), batch_size=batch_size, **kwargs)
-    return model.transcribe(str(audio_path), **kwargs)
+        return pipe.transcribe(audio, batch_size=batch_size, **kwargs)
+    return model.transcribe(audio, **kwargs)
 
 
 def _words_to_dicts(words: Any, offset_s: float = 0.0) -> list[dict[str, Any]] | None:
@@ -303,6 +361,9 @@ class _SegmentWriter:
         self.counter = 0
         self.total_words = 0
         self.n_empty = 0
+        self.n_clamped = 0
+        self.n_unclamped_overlaps = 0
+        self._last_end: float | None = None
         self.speaker_counts: dict[str, int] = defaultdict(int)
         self.segments_meta: list[dict] = []
 
@@ -320,10 +381,16 @@ class _SegmentWriter:
         overlap: float,
         words: list[dict[str, Any]] | None,
     ) -> bool:
-        """Write one display segment to txt/srt/json(l). Returns False if empty."""
+        """Write one display segment to txt/srt/json(l). Returns False if empty.
+
+        Sub-second overlaps with the previous segment (word-alignment drift at
+        Whisper segment boundaries) are clamped so timestamps stay monotonic;
+        see `BOUNDARY_OVERLAP_CLAMP_S`.
+        """
         text = text.strip()
         if not text:
             return False
+        start, end = self._monotonic(start, end)
         self.counter += 1
 
         if self._has_diar and speaker is not None:
@@ -356,6 +423,19 @@ class _SegmentWriter:
         if self.counter % self._flush_every == 0:
             self.flush()
         return True
+
+    def _monotonic(self, start: float, end: float) -> tuple[float, float]:
+        """Clamp a small overlap with the previous segment; track large ones."""
+        if self._last_end is not None and start < self._last_end:
+            overlap = self._last_end - start
+            if overlap <= BOUNDARY_OVERLAP_CLAMP_S:
+                start = self._last_end
+                self.n_clamped += 1
+            else:
+                self.n_unclamped_overlaps += 1
+        end = max(end, start)
+        self._last_end = end if self._last_end is None else max(self._last_end, end)
+        return start, end
 
     def flush(self) -> None:
         """Flush all open output handles."""
@@ -520,7 +600,10 @@ def _transcribe_streaming_once(
 
     # ── Launch transcription (lazy generator)
     t_launch = time.time()
-    segments_iter, info = _launch_transcription(model, audio_path, kwargs, batch_size)
+    audio_input = _load_audio_input(audio_path, config.sample_rate)
+    audio_reader = "pyav" if isinstance(audio_input, str) else "native_wav"
+    segments_iter, info = _launch_transcription(model, audio_input, kwargs, batch_size)
+    del audio_input  # faster-whisper keeps its own reference while decoding
     timings["whisper_launch_s"] = round(time.time() - t_launch, 2)
     logger.info(f"   Language: {info.language} (prob {info.language_probability:.2%})")
     logger.info(f"   Duration: {info.duration:.1f}s = {info.duration / 60:.1f} min")
@@ -578,6 +661,7 @@ def _transcribe_streaming_once(
         batch_size_requested=config.batch_size,
         batch_size_effective=batch_size,
         word_timestamps_effective=word_timestamps,
+        audio_reader=audio_reader,
     )
 
     atomic_write_json(output_json, metadata)
@@ -728,7 +812,9 @@ def _transcribe_chunked_once(
                     f"   Chunk {chunk.index + 1}/{len(chunks)} "
                     f"({chunk.start_s / 60:.1f}-{chunk.end_s / 60:.1f} min)"
                 )
-                segments_iter, info = _launch_transcription(model, chunk.path, kwargs, batch_size)
+                segments_iter, info = _launch_transcription(
+                    model, _load_audio_input(chunk.path, config.sample_rate), kwargs, batch_size
+                )
                 last_info = info
 
                 # Trailing overlap cutoff (absolute timestamp in original audio).
@@ -821,6 +907,7 @@ def _build_run_metadata(
     batch_size_requested: int = 1,
     batch_size_effective: int = 1,
     word_timestamps_effective: bool = False,
+    audio_reader: str = "native_wav",
 ) -> dict[str, Any]:
     """Build the unified metadata dict written to .json."""
     try:
@@ -864,9 +951,12 @@ def _build_run_metadata(
         "total_segments": len(writer.segments_meta),
         "total_words": writer.total_words,
         "empty_segments_discarded": writer.n_empty,
+        "timestamps_clamped": writer.n_clamped,
+        "timestamps_unclamped_overlaps": writer.n_unclamped_overlaps,
         # Decoding
         "batch_size_requested": batch_size_requested,
         "batch_size_effective": batch_size_effective,
+        "audio_reader": audio_reader,
         # Chunking info (legacy path)
         "chunked": chunked,
         "n_chunks": n_chunks,

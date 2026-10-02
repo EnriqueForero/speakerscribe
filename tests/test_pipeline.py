@@ -280,3 +280,60 @@ class TestWavBySignature:
         sig = meta["file_hash"]
         assert created == [f"{media.stem}_{sig[:10]}.wav"]
         assert not list(paths.audio_tmp.glob("*.wav")), "temp wav deleted after run"
+
+
+class TestBatchStopsOnEnvironmentError:
+    """0.3.1: a broken environment stops the batch after the first file.
+
+    Before, the 2026-10-01 incident repeated the same TypeError on six files,
+    each after a full diarization (~45 min of T4 for nothing).
+    """
+
+    def test_environment_error_stops_batch(self, ws, monkeypatch):
+        from contextlib import contextmanager
+
+        import speakerscribe.pipeline as pl
+        from speakerscribe.environment import EnvironmentIncompatibleError
+
+        paths, media = ws
+        (paths.data / "second.mp4").write_bytes(b"other-content-" * 1000)
+
+        @contextmanager
+        def fake_loaded(config):
+            yield FakeModel()
+
+        calls = []
+
+        def broken_process_one(item, *args, **kwargs):
+            calls.append(item.name)
+            raise TypeError("open() got an unexpected keyword argument 'metadata_errors'")
+
+        monkeypatch.setattr(pl, "loaded_whisper", fake_loaded)
+        monkeypatch.setattr(pl, "process_one", broken_process_one)
+        with pytest.raises(EnvironmentIncompatibleError, match="Batch stopped"):
+            pl.process_batch(paths, _cfg())
+        assert len(calls) == 1
+
+    def test_per_file_error_does_not_stop_batch(self, ws, monkeypatch):
+        from contextlib import contextmanager
+
+        import speakerscribe.pipeline as pl
+
+        paths, media = ws
+        (paths.data / "second.mp4").write_bytes(b"other-content-" * 1000)
+
+        @contextmanager
+        def fake_loaded(config):
+            yield FakeModel()
+
+        calls = []
+
+        def flaky_process_one(item, *args, **kwargs):
+            calls.append(item.name)
+            raise ValueError("this one file is corrupt")
+
+        monkeypatch.setattr(pl, "loaded_whisper", fake_loaded)
+        monkeypatch.setattr(pl, "process_one", flaky_process_one)
+        results = pl.process_batch(paths, _cfg())
+        assert len(calls) == 2
+        assert all(r["status"] == "error" for r in results)

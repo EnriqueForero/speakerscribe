@@ -2,6 +2,7 @@
 
 Public API:
     extract_audio_wav        — Extract 16 kHz mono WAV from any media file.
+    read_wav_float32         — Load a PCM16 mono WAV as float32 samples (no PyAV).
     get_audio_duration_seconds — Probe duration via ffprobe (no decoding).
     split_long_audio         — Split a long WAV into overlapping chunks (legacy).
     file_signature           — Content signature ("fast" sampled or "full" SHA-256).
@@ -17,11 +18,16 @@ import json
 import shutil
 import subprocess
 import time
+import wave
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from speakerscribe.logging_config import logger
+
+if TYPE_CHECKING:
+    import numpy as np
 
 # ─── Subprocess timeouts ───────────────────────────────────────────
 FFPROBE_TIMEOUT_S = 30
@@ -154,6 +160,81 @@ def extract_audio_wav(
     size_mb = output_file.stat().st_size / 1e6
     logger.success(f"Audio extracted in {time.time() - t0:.1f}s ({size_mb:.1f} MB)")
     return output_file
+
+
+class UnsupportedWavFormatError(ValueError):
+    """The WAV file is not 16-bit PCM mono at the expected sampling rate."""
+
+
+_WAV_READ_BLOCK_FRAMES = 1 << 20
+"""Frames converted per block (~1 M samples = 4 MB float32): bounds peak RAM."""
+
+
+def read_wav_float32(path: Path, *, expected_sample_rate: int = 16_000) -> np.ndarray:
+    """Load a 16-bit PCM mono WAV as float32 samples in [-1, 1).
+
+    Why this exists:
+        The pipeline already normalizes every input to a 16 kHz mono PCM16
+        WAV with ffmpeg (`extract_audio_wav`). Passing that WAV *path* to
+        faster-whisper made it decode the file a second time through PyAV —
+        and PyAV 19.0.0 (2026-09-29) removed the `metadata_errors` argument
+        that faster-whisper 1.2.1 still passes, so every transcription
+        failed. Reading the PCM samples with the standard library removes
+        PyAV from the transcription path entirely.
+
+    The conversion `int16 / 32768.0` is bit-identical to faster-whisper's
+    `decode_audio` for this format (verified in
+    `tests/test_audio_decoding_parity.py`).
+
+    Memory: samples are converted block by block into a preallocated
+    float32 array, so peak RAM is ~4 bytes per sample (~230 MB per hour
+    of 16 kHz audio) instead of 6 bytes per sample for a naive
+    read-all-then-convert.
+
+    Args:
+        path: WAV file to read.
+        expected_sample_rate: Required sampling rate in Hz.
+
+    Returns:
+        1-D float32 numpy array.
+
+    Raises:
+        FileNotFoundError: If `path` does not exist.
+        UnsupportedWavFormatError: If the file is not uncompressed PCM16
+            mono at `expected_sample_rate` (callers fall back to PyAV).
+    """
+    import numpy as np
+
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"WAV not found: {path}")
+    try:
+        with wave.open(str(path), "rb") as reader:
+            channels = reader.getnchannels()
+            width = reader.getsampwidth()
+            rate = reader.getframerate()
+            compression = reader.getcomptype()
+            if (channels, width, rate, compression) != (1, 2, expected_sample_rate, "NONE"):
+                raise UnsupportedWavFormatError(
+                    f"{path.name}: expected PCM16 mono {expected_sample_rate} Hz, got "
+                    f"channels={channels} sampwidth={width} rate={rate} comp={compression}"
+                )
+            n_frames = reader.getnframes()
+            out = np.empty(n_frames, dtype=np.float32)
+            filled = 0
+            while filled < n_frames:
+                raw = reader.readframes(min(_WAV_READ_BLOCK_FRAMES, n_frames - filled))
+                if not raw:
+                    break
+                block = np.frombuffer(raw, dtype="<i2")
+                out[filled : filled + block.size] = block
+                filled += block.size
+    except (wave.Error, EOFError) as e:
+        raise UnsupportedWavFormatError(f"{path.name}: not a readable PCM WAV ({e})") from e
+    if filled < n_frames:  # truncated file: header promised more frames
+        out = out[:filled]
+    out /= 32768.0
+    return out
 
 
 def get_audio_duration_seconds(path: Path) -> float:
@@ -460,11 +541,13 @@ def format_hms(seconds: float) -> str:
 
 __all__ = [
     "AudioChunk",
+    "UnsupportedWavFormatError",
     "calculate_file_hash",
     "extract_audio_wav",
     "file_signature",
     "format_hms",
     "format_srt_timestamp",
     "get_audio_duration_seconds",
+    "read_wav_float32",
     "split_long_audio",
 ]

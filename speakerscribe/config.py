@@ -504,7 +504,9 @@ class WorkspacePaths(BaseModel):
             `<system tmp>/speakerscribe_scratch`.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # extra='forbid': an unknown kwarg (e.g. transcripts=...) must fail loudly
+    # instead of being ignored while the default layout is silently used.
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     workspace: str
     scratch: str | None = None

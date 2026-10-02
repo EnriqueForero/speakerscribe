@@ -120,6 +120,15 @@ class DiarizationEngine:
                 f"   Original error: {e}"
             ) from e
 
+        if pipeline is None:
+            # pyannote returns None (instead of raising) when the token cannot
+            # access the gated model; fail with the same actionable message.
+            raise RuntimeError(
+                "Could not load pyannote pipeline: from_pretrained returned None.\n"
+                "   Most likely cause: invalid HF token or unaccepted model terms at\n"
+                f"   https://huggingface.co/{self._config.diarization_model}"
+            )
+
         if torch.cuda.is_available():
             pipeline.to(torch.device("cuda"))
             vram = torch.cuda.memory_allocated() / 1e9

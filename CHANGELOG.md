@@ -7,6 +7,55 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
+## [0.3.1] — 2026-10-02
+
+> Hotfix: every transcription failed on fresh installs since PyAV 19.0.0
+> (2026-09-29) with `TypeError: open() got an unexpected keyword argument
+> 'metadata_errors'`, raised by faster-whisper 1.2.1 AFTER diarization.
+
+### Fixed
+- **Transcription no longer depends on PyAV.** The 16 kHz mono PCM16 WAV the
+  pipeline already extracts is read with the standard library
+  (`audio.read_wav_float32`) and passed to faster-whisper as an array.
+  Bit-identical to `faster_whisper.audio.decode_audio` on real ffmpeg output
+  (`tests/test_audio_decoding_parity.py`). Non-PCM16 inputs fall back to the
+  file path as before. Run metadata records `audio_reader`.
+- **Dependency cap `av>=11,<19`** (plus explicit `numpy>=1.24`). Lift it only
+  when the minimum faster-whisper release includes SYSTRAN/faster-whisper#1495.
+- **Monotonic timestamps at Whisper segment boundaries.** Word-level DTW
+  drift stamped the tail of a segment up to ~0.85 s after the start of the
+  next one; 11 of 94 real meetings were published with the critical flag
+  "Timestamps no monotónicos". Overlaps up to 1.0 s are now clamped (SRT cues
+  never overlap); larger ones are kept and counted. New metadata keys:
+  `timestamps_clamped`, `timestamps_unclamped_overlaps`.
+- **pyannote returning `None`** from `from_pretrained` (gated model without
+  access) now raises the actionable "Could not load pyannote pipeline" error.
+- **Extra `bench` was unresolvable** (`pyannote.metrics<4.0` vs
+  pyannote.audio 4.x); now `pyannote.metrics>=4.0,<5.0`.
+
+### Added
+- `speakerscribe.environment`: `check_audio_decoding()` (1 s synthetic
+  self-test of the native and PyAV paths, no GPU), `package_versions()`,
+  `is_environment_error()` and `EnvironmentIncompatibleError`.
+- `preflight_check` runs the decoding self-test before any model loads.
+- `process_batch` stops on an environment error (same failure expected for
+  every remaining file) instead of repeating it file after file.
+- `WorkspacePaths` rejects unknown fields (`extra="forbid"`): a typo such as
+  `transcripts=...` now fails instead of silently using the default layout.
+- Python 3.13 (Google Colab's runtime) declared and tested.
+
+### Changed
+- Version has a single source of truth (`speakerscribe/__init__.py`,
+  read dynamically by setuptools).
+- CI: unit tests on 3.10–3.13; real-decoder integration on 3.11 and 3.13
+  with ffmpeg and espeak-ng (fails instead of skipping when tools are
+  missing); weekly scheduled run; mypy job; `scripts/lint_notebooks.py`
+  (replaces `check_notebook_parity.py`; also requires stripped outputs).
+- Release workflow: tag/version check, `twine check`, GitHub Release with
+  artifacts; `hatchling` no longer installed.
+
+---
+
 ## [0.3.0] — 2026-06-11
 
 > Release auditado: cierra los hallazgos P0/P1 de la auditoría de junio 2026.

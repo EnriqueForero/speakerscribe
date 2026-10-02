@@ -224,3 +224,107 @@ class TestBatchingAndOom:
         assert content.count("basura parcial") == 1  # rewritten, not appended
         assert "final limpio" in content
         assert meta["total_segments"] == 2
+
+
+def _write_pcm16(path, n=16_000, rate=16_000):
+    import wave
+
+    import numpy as np
+
+    pcm = (np.sin(np.arange(n) / 10.0) * 8000).astype("<i2")
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm.tobytes())
+    return pcm
+
+
+class TestNativeAudioInput:
+    """0.3.1: the pipeline WAV reaches faster-whisper as an array (no PyAV)."""
+
+    def test_pcm16_wav_is_passed_as_float32_array(self, outs):
+        import numpy as np
+
+        pcm = _write_pcm16(outs["txt"].with_suffix(".wav"))
+        model, meta = _run(TranscriptionConfig(batch_size=1), outs)
+        audio = model.calls[0]["audio"]
+        assert isinstance(audio, np.ndarray)
+        np.testing.assert_array_equal(audio, pcm.astype(np.float32) / 32768.0)
+        assert meta["audio_reader"] == "native_wav"
+
+    def test_batched_path_also_receives_array(self, outs):
+        import numpy as np
+
+        _write_pcm16(outs["txt"].with_suffix(".wav"))
+        model, _ = _run(TranscriptionConfig(batch_size=8), outs)
+        assert model.calls[0]["mode"] == "batched"
+        assert isinstance(model.calls[0]["audio"], np.ndarray)
+
+    def test_other_sample_rate_falls_back_to_path(self, outs):
+        _write_pcm16(outs["txt"].with_suffix(".wav"), rate=22_050)
+        model, meta = _run(TranscriptionConfig(batch_size=1, sample_rate=22_050), outs)
+        assert isinstance(model.calls[0]["audio"], str)
+        assert meta["audio_reader"] == "pyav"
+
+    def test_non_wav_falls_back_to_path(self, outs):
+        outs["txt"].with_suffix(".wav").write_bytes(b"\x00" * 64)
+        model, meta = _run(TranscriptionConfig(batch_size=1), outs)
+        assert isinstance(model.calls[0]["audio"], str)
+        assert meta["audio_reader"] == "pyav"
+
+
+class TestBoundaryClamp:
+    """0.3.1: sub-second overlaps at Whisper segment boundaries are clamped.
+
+    The patterns come from real meetings published on 2026-08/09 with the
+    flag "Timestamps no monotónicos" (overlaps of 0.39 to 0.85 s).
+    """
+
+    @staticmethod
+    def _segments(*triples):
+        return [FakeSegment(a, b, t) for a, b, t in triples]
+
+    def test_small_overlap_is_clamped_and_counted(self, outs):
+        segs = self._segments(
+            (30.12, 42.78, " piloto con seguimiento trimestral"),
+            (73.61, 73.71, " el final del curso."),
+            (73.15, 74.89, " El próximo comité."),
+        )
+        _, meta = _run(TranscriptionConfig(batch_size=1), outs, model=FakeModel([segs]), turns=None)
+        starts = [s["start"] for s in meta["segments"]]
+        assert starts == sorted(starts)
+        assert meta["segments"][2]["start"] == pytest.approx(73.71)
+        assert meta["segments"][2]["end"] == pytest.approx(74.89)
+        assert meta["timestamps_clamped"] == 1
+        assert meta["timestamps_unclamped_overlaps"] == 0
+
+    def test_zero_length_tail_then_earlier_start(self, outs):
+        segs = self._segments(
+            (5615.22, 5616.62, " ¿Puedo"),
+            (5616.62, 5616.62, " hacerlo mejor?"),
+            (5615.77, 5625.09, " Pero las personas tienen dos meses de prueba"),
+        )
+        _, meta = _run(TranscriptionConfig(batch_size=1), outs, model=FakeModel([segs]), turns=None)
+        assert meta["segments"][2]["start"] == pytest.approx(5616.62)
+        assert meta["timestamps_clamped"] == 1
+
+    def test_large_overlap_is_left_alone_and_counted(self, outs):
+        segs = self._segments((10.0, 20.0, " uno"), (18.0, 25.0, " dos"))
+        _, meta = _run(TranscriptionConfig(batch_size=1), outs, model=FakeModel([segs]), turns=None)
+        assert meta["segments"][1]["start"] == pytest.approx(18.0)
+        assert meta["timestamps_clamped"] == 0
+        assert meta["timestamps_unclamped_overlaps"] == 1
+
+    def test_end_never_precedes_start_after_clamp(self, outs):
+        segs = self._segments((0.0, 5.0, " a"), (4.5, 4.8, " b"))
+        _, meta = _run(TranscriptionConfig(batch_size=1), outs, model=FakeModel([segs]), turns=None)
+        seg = meta["segments"][1]
+        assert seg["start"] == pytest.approx(5.0)
+        assert seg["end"] >= seg["start"]
+
+    def test_srt_cues_follow_clamped_times(self, outs):
+        segs = self._segments((1.0, 2.5, " a"), (2.2, 3.0, " b"))
+        _run(TranscriptionConfig(batch_size=1), outs, model=FakeModel([segs]), turns=None)
+        srt = outs["srt"].read_text(encoding="utf-8")
+        assert "00:00:02,500 --> 00:00:03,000" in srt
