@@ -34,8 +34,9 @@ El dueño descargó la rama de trabajo como zip, la subió a `Pruebas/Speakerscr
 ### PyPI está atrasado (HECHO)
 - PyPI tiene **0.1.1** como última versión. Fuente: https://pypi.org/pypi/speakerscribe/json, consultado el 2026-10-02.
 - 0.3.0 nunca llegó a PyPI, aunque su tag existe en GitHub.
-- `release.yml` falló en sus 3 ejecuciones (tags `v0.1.0`, `v0.1.1` y `v0.3.0`), siempre en el paso «Publish to PyPI (Trusted Publishing)». Fuente: [Actions, ejecución de v0.3.0](https://github.com/EnriqueForero/speakerscribe/actions/runs/27457399192).
-  - 0.1.0 y 0.1.1 llegaron a PyPI por otra vía. INFERENCIA: la subida local del notebook con `PYPI_TOKEN`.
+- `release.yml` falló en sus 3 ejecuciones:
+  - `v0.1.0` y `v0.1.1`: falló la construcción («Build wheel and sdist»). Aun así, 0.1.0 y 0.1.1 llegaron a PyPI por otra vía. INFERENCIA: la subida local del notebook con `PYPI_TOKEN`.
+  - `v0.3.0`: la construcción pasó y falló «Publish to PyPI (Trusted Publishing)». Fuente: [Actions](https://github.com/EnriqueForero/speakerscribe/actions/runs/27457399192).
   - VACÍO: la causa exacta. Los registros expiraron (HTTP 410).
   - INFERENCIA: falta el *trusted publisher* en PyPI. Configurarlo es lo primero de [GUIA_LOTE.md § 7](GUIA_LOTE.md#7-publicar-una-versión-en-pypi).
 
