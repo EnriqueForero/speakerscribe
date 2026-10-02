@@ -9,6 +9,43 @@ Convenciones:
 
 ---
 
+## 2026-10-02 (tarde) — Primera corrida del dueño y notebook de publicación 0.4
+
+### Contexto
+El dueño descargó la rama de trabajo como zip, la subió a `Pruebas/Speakerscribe/` en Drive y ejecutó `notebooks/speakerscribe_lote.ipynb` con *Ejecutar todo*. No se procesó ningún audio.
+
+### Diagnóstico (HECHO, salidas del notebook)
+- El censo encontró 12 archivos pendientes en la carpeta `data/` nueva.
+- La celda 6 se detuvo en 5,6 s con `WorkspaceBindingError`. El estado estaba registrado con `Pruebas/Speakerscribe/data` y la entrada actual es `…/Transcripcion-Diarizacion/data`.
+- Es la protección prevista: no se gastó GPU ni se tocó nada. Falta revincular **una vez** (celda 4, `REVINCULAR = True`).
+- La máquina quedó encendida, porque un error del orquestador no apaga.
+
+### Cambios (HECHO)
+- **Notebook de publicación adaptado y versionado** en `notebooks/publicacion/`. Antes, sus celdas D podían borrar de GitHub todo lo que faltara en Drive, retroceder la versión y romper `pyproject.toml`. Ahora:
+  - La versión se lee de `__init__.py`.
+  - Nueva Celda S: Drive ← GitHub, con respaldo y sin borrar nada.
+  - Tag y PyPI solo con `PUBLICAR_RELEASE = True`.
+  - Las pruebas corren sobre lo que se publica.
+  - Los notebooks salen sin salidas de Colab.
+  - No se crean commits vacíos.
+  - Guardias contra versión menor, borrados, contenido viejo y notebooks con valores locales.
+- `tests/test_cli.py` ya no importa `click`: typer 0.27 dejó de depender de él y la suite fallaba en entornos livianos.
+
+### Verificación (HECHO)
+Simulación de extremo a extremo del notebook de publicación: git real contra un remoto local y Colab simulado. Todos los escenarios dieron el resultado esperado:
+- Drive con 0.3.0: se detiene.
+- Celda S y luego publicar: sin borrados, sin commit vacío, `.gitignore` y `pyproject.toml` intactos, sin datos.
+- Archivo borrado en Drive: se detiene.
+- Mismo número de versión con contenido viejo: se detiene.
+- Versión menor: se detiene.
+- `PUBLICAR_RELEASE = True`: crea el tag.
+- Edición real: se publica.
+- Notebook ejecutado en Colab: no se filtran salidas ni el nombre de usuario.
+- Notebook viejo ejecutado en Colab: se detiene.
+- `PROBAR_SOLO` lleno o bandera en `True`: se detiene.
+
+---
+
 ## 2026-10-02 — 0.3.1 y 0.4.0: del fallo de PyAV a un lote reanudable y probado
 
 ### Contexto
@@ -46,7 +83,7 @@ Convenciones:
 | Q21 | Prueba de humo con un audio corto. |
 | Q22 | Un PR por fase. |
 | — | PyPI se publica **solo después** de una prueba exitosa del dueño en Colab. |
-| — | El notebook de publicación de Drive se conserva. Ver la advertencia en [GUIA_LOTE.md](GUIA_LOTE.md#9-notebook-de-publicación-de-drive). |
+| — | El notebook de publicación de Drive se conserva. Se adaptó a 0.4: ver la entrada siguiente y [GUIA_LOTE.md § 9](GUIA_LOTE.md#9-notebook-de-publicación). |
 
 ### Cambios (HECHO, todos en `main`)
 | PR | Versión | Qué |
@@ -54,7 +91,7 @@ Convenciones:
 | [#5](https://github.com/EnriqueForero/speakerscribe/pull/5) | 0.3.1 | La transcripción ya no usa PyAV: el WAV PCM16 se lee con la librería estándar. Tope `av>=11,<19`. Autoprueba de decodificación. Corte del lote ante errores de entorno. Ajuste de solapes ≤1 s. CI en 3.10–3.13 con integración real. |
 | [#6](https://github.com/EnriqueForero/speakerscribe/pull/6) | — | Higiene: `_runs.jsonl` sale del repo sin reescribir el historial. Acciones de GitHub actualizadas a v6/v8. Una sola ruta de publicación. |
 | [#7](https://github.com/EnriqueForero/speakerscribe/pull/7) | 0.4.0 | `speakerscribe.batch`: el notebook v5 pasa a ser un paquete con pruebas. Notebook nuevo `notebooks/speakerscribe_lote.ipynb`. |
-| (este) | 0.4.0 | Bitácora, guía de operación y `PROBAR_SOLO` en el notebook. |
+| [#8](https://github.com/EnriqueForero/speakerscribe/pull/8) | 0.4.0 | Bitácora, guía de operación y `PROBAR_SOLO` en el notebook. |
 
 Otros:
 - Rama `wip/pipeline-pkg`: borrador recuperado de Drive; no está integrado.
@@ -77,5 +114,5 @@ Otros:
 |---|---|---|---|
 | Prueba real en GPU T4 con un audio corto | Dueño | Próxima sesión de Colab | [GUIA_LOTE.md § Primera vez](GUIA_LOTE.md#4-primera-vez-después-de-esta-actualización) |
 | Publicar 0.4.0 en PyPI | Dueño + Claude | Después de una prueba exitosa | [GUIA_LOTE.md § Publicar](GUIA_LOTE.md#7-publicar-una-versión-en-pypi) |
-| Sincronizar la copia de código en Drive con GitHub | Dueño | Antes de volver a usar el notebook de publicación | [GUIA_LOTE.md § Sincronizar](GUIA_LOTE.md#8-sincronizar-la-copia-de-código-en-drive) |
+| Sincronizar la copia de código en Drive con GitHub | Dueño | Antes de volver a usar el notebook de publicación | Celda S ([GUIA_LOTE.md § 9](GUIA_LOTE.md#9-notebook-de-publicación)) |
 | Quitar el tope `av<19` | Mantenimiento | Cuando faster-whisper publique el arreglo #1495 | Subir el mínimo de faster-whisper y retirar el tope |
