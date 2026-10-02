@@ -77,3 +77,49 @@ ffmpeg → scratch WAV → DiarizationEngine (cache) → transcribe (batched)
                                   ▼
                         ledger append (status, attempt, flags)
 ```
+
+
+## Batch package
+
+`speakerscribe.batch` runs the library over a Drive folder across many
+Colab sessions. Layers, from pure to effectful:
+
+| Module | Responsibility |
+|---|---|
+| `settings.py` | `BatchSettings`: every business parameter, validated and frozen |
+| `paths.py` | `BatchPaths`: every folder and state file, derived once (v5-compatible state layout) |
+| `fsio.py` | Atomic writes, content hashing, single-read copy+hash |
+| `identity.py` | `source_id` (location) vs content signature; workspace ↔ input binding |
+| `journal.py` | Append-only `events.jsonl` + `JournalIndex` (attempts, successes, dedup keys) |
+| `locking.py` | Exclusive lock with heartbeat; ownership checked before every promotion |
+| `discovery.py` | Recursive scan, ffprobe classification, stable signature with local staging |
+| `layout.py` | Output names (keep `*`) and deliverable locations |
+| `renderers.py` | Pure renderers + registry of deliverables (Open/Closed) |
+| `profiles.py` | Motor profile (costs GPU) vs presentation profile (CPU re-render); diarization-cache key |
+| `masters.py` | Master JSON per source (re-render/rename without GPU) |
+| `publisher.py` | Write deliverables, `prepared`→`completed` commit, crash recovery |
+| `planner.py` | Per-source decision: ready · re-render · reuse · process · skip |
+| `executor.py` | Execute a decision (GPU job with quality valve, CPU re-render, reuse) |
+| `engine.py` | `TranscriptionEngine` protocol + `SpeakerscribeEngine` (the only CUDA code) |
+| `guards.py` | Session budget, RAM guard, circuit breaker, shutdown decision (pure) |
+| `retention.py` | Move to `_procesados/`, purge, diarization-cache pruning |
+| `preflight.py` | Storage (no GPU) → GPU stack, decoding self-test, HF access |
+| `reporting.py` | `SessionReport`, `_resumen.md`, review list, autopsy |
+| `runner.py` | Composition root: `BatchRunner.run()`, `run_batch()` |
+| `tools.py` | `status`, `published`, `rename_speakers`, `rebind_workspace`, `autopsy` |
+| `colab.py` | Colab-only code (shutdown countdown) |
+
+Contracts:
+
+1. **Durable before next.** A file's deliverables, master JSON and journal
+   commit are durable before the next file starts.
+2. **Never overwrite what the batch did not write.** New names that collide
+   with an existing file get `~<id>`; confirmed outputs moved, renamed or
+   edited by the user are reported, not regenerated.
+3. **Failures are classified, not retried blindly.** Environment failures
+   never consume attempts; identical consecutive ones stop the batch.
+4. **Only verified successes retire audio.** Quality `ok`, committed output
+   and master JSON present; flagged results keep their audio in `data/`.
+5. **Testable without GPU.** The runner depends on `TranscriptionEngine`;
+   tests drive it with a scripted fake, and `tests/test_batch_characterization.py`
+   pins the behavior to the frozen v5 notebook.

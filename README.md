@@ -33,6 +33,28 @@ Open the companion notebook:
 
 The notebook handles everything: installation, Google Drive mounting, HF token setup, and batch processing.
 
+### Resumable batch over Google Drive (`speakerscribe.batch`, 0.4+)
+
+For collections processed across many Colab sessions, use
+[`notebooks/speakerscribe_lote.ipynb`](notebooks/speakerscribe_lote.ipynb) or
+the API directly:
+
+```python
+from speakerscribe.batch import BatchSettings, run_batch, status
+
+settings = BatchSettings(root="/content/drive/MyDrive/<project>")  # one config object
+print("\n".join(status(settings).lines()))   # census, no GPU
+report = run_batch(settings)                 # resumes exactly where it stopped
+```
+
+Layout under `root`: `data/` (input, scanned recursively) → `entregables/`
+(one canonical `.txt` per recording, same name as the audio, plus
+`_resumen.md` and the `.speakerscribe_state/` journal) · `transcripts/`
+(optional `.transcript.md`/`.srt`/`.json`) · `splits/` (`.full_for_llm.txt`,
+parts) · `_procesados/YYYY-MM-DD/` (audio already transcribed; purged after
+30 days). Every state change is journaled; a killed session loses at most
+the file in progress. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#batch-package).
+
 ---
 
 ## Installation

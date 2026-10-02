@@ -91,6 +91,22 @@ class DiarizationEngine:
         self.close()
 
     # ── Lifecycle ──────────────────────────────────────────────────
+    def load(self) -> None:
+        """Load the pipeline now instead of on the first `diarize` call.
+
+        Batch callers use it to validate HuggingFace access (token, gated
+        model terms) BEFORE spending ~35 s loading Whisper.
+
+        Raises:
+            RuntimeError: If the pipeline cannot be loaded.
+        """
+        self._ensure_loaded()
+
+    @property
+    def is_loaded(self) -> bool:
+        """True while the pyannote pipeline is resident."""
+        return self._pipeline is not None
+
     def _ensure_loaded(self) -> Any:
         """Load the pyannote pipeline on first use (and move it to CUDA)."""
         if self._pipeline is not None:
