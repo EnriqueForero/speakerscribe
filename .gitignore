@@ -1,7 +1,8 @@
 # ════════════════════════════════════════════════════════════════════
 # .gitignore — speakerscribe
-# Generado automáticamente por el notebook de publicación.
-# PRINCIPIO: solo va a git el CÓDIGO.
+# PRINCIPIO: solo va a git el CÓDIGO. Nunca audio, transcripciones,
+# journals ni ledgers (contienen nombres y contenido de reuniones reales).
+# Se edita a mano; el antiguo notebook de publicación ya no lo regenera.
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -57,8 +58,12 @@ z. Posibles Mejoras/
 
 # ── Archivos específicos excluidos ────────────────────────────────────
 .coverage
-_runs.db
+_runs.*
+*.jsonl
+*.json.gz
 coverage.xml
+.mypy_cache/
+.local/
 
 
 # ── Carpetas de trabajo personal ──────────────────────────────────────
@@ -88,4 +93,6 @@ secrets.json
 # Estas reglas DEBEN ser las últimas del archivo.
 # En .gitignore la última coincidencia gana; si una regla
 # de exclusión aparece después de una excepción, la anula.
-!notebooks/notebook_speakerscribe.ipynb
+!notebooks/
+!notebooks/**/
+!notebooks/**/*.ipynb
