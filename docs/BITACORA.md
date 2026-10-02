@@ -83,7 +83,7 @@ Simulación de extremo a extremo del notebook de publicación: git real contra u
 | Q21 | Prueba de humo con un audio corto. |
 | Q22 | Un PR por fase. |
 | — | PyPI se publica **solo después** de una prueba exitosa del dueño en Colab. |
-| — | El notebook de publicación de Drive se conserva. Se adaptó a 0.4: ver la entrada siguiente y [GUIA_LOTE.md § 9](GUIA_LOTE.md#9-notebook-de-publicación). |
+| — | El notebook de publicación de Drive se conserva. Se adaptó a 0.4: ver la entrada «(tarde)», arriba, y [GUIA_LOTE.md § 9](GUIA_LOTE.md#9-notebook-de-publicación). |
 
 ### Cambios (HECHO, todos en `main`)
 | PR | Versión | Qué |

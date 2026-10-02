@@ -40,9 +40,11 @@ pre-commit hook). Tests build their own synthetic data.
 
 ## Releasing (single path: tag → GitHub Actions)
 
-> The Drive "publication notebook" must not be used to publish this repository: its publish
-> cells copy the Drive folder over `main` with `git add -A`, regenerate `.gitignore` and rewrite
-> the (dynamic) version line. See [docs/GUIA_LOTE.md §9](docs/GUIA_LOTE.md#9-notebook-de-publicación-de-drive).
+> The owner's Drive publication notebook
+> (`notebooks/publicacion/Publicacion_GitHub_PyPI_speakerscribe.ipynb`) was adapted to this flow
+> in 0.4. It reads the version from `__init__.py` and tags only with `PUBLICAR_RELEASE=True`.
+> It also stops before touching GitHub on a lower version, a deletion, an older file content or a
+> notebook carrying local values. See [docs/GUIA_LOTE.md §9](docs/GUIA_LOTE.md#9-notebook-de-publicación).
 
 1. Bump `__version__` in `speakerscribe/__init__.py` — the only version
    source (`pyproject.toml` reads it dynamically) — and add the CHANGELOG
