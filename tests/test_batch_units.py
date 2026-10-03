@@ -43,6 +43,7 @@ from speakerscribe.batch.locking import LockError, StateLock
 from speakerscribe.batch.preflight import PreflightError, check_hf_access, check_storage
 from speakerscribe.batch.reporting import Row, SessionReport, autopsy, render_resumen_md
 from speakerscribe.batch.retention import MoveToProcessed, prune_diar_cache, purge_processed
+from speakerscribe.environment import EnvironmentIncompatibleError
 from tests.batch_fakes import make_settings
 
 
@@ -207,6 +208,17 @@ class TestJournal:
         assert JournalIndex.build(log).attempts == {"j": 2}
         log.append({"event": "attempts_reset", "job_id": "j"})
         assert JournalIndex.build(log).attempts == {}
+
+    def test_old_failures_are_reread_with_todays_rules(self):
+        """2026-10-03: libcublas.so.12 was journaled as per-file before its marker existed."""
+        cublas = "RuntimeError: Library libcublas.so.12 is not found or cannot be loaded"
+        log = [
+            {"event": "failed_retryable", "job_id": "env", "error": cublas},
+            {"event": "failed_retryable", "job_id": "file", "error": "ValueError: bad segment"},
+            {"event": "failed_retryable", "job_id": "diar", "error": cublas, "stage": "diar_file"},
+            {"event": "quality_rejected", "job_id": "q", "error": cublas},
+        ]
+        assert JournalIndex.build(log).attempts == {"file": 1, "diar": 1, "q": 1}
 
 
 class TestUnfinishedSignatures:
@@ -539,8 +551,83 @@ class TestGpuPreflight:
         cuda.get_device_properties = lambda i: types.SimpleNamespace(total_memory=16e9)  # type: ignore[attr-defined]
         paths.ensure()
         monkeypatch.setattr(pf, "check_hf_access", lambda c: ["aviso"])
+
+        def no_cublas():
+            raise EnvironmentIncompatibleError("Library libcublas.so.12 is not found")
+
+        monkeypatch.setattr(pf, "provide_ctranslate2_cuda_libs", no_cublas)
+        with pytest.raises(PreflightError, match="CTranslate2 no puede usar la GPU"):
+            pf.check_gpu_stack(cfg, paths, (1000, 60.0))  # type: ignore[arg-type]
+
+        cublas = {"soname": "libcublas.so.12", "source": "system"}
+        monkeypatch.setattr(pf, "provide_ctranslate2_cuda_libs", lambda: cublas)
         env = pf.check_gpu_stack(cfg, paths, (1000, 60.0))  # type: ignore[arg-type]
         assert env["gpu"] == "Tesla T4" and env["warnings"] == ["aviso"]
+        assert env["cuda_libs"] == cublas
+
+
+class TestProvideCtranslate2CudaLibs:
+    """Colab's CUDA 13 images lack the CUDA 12 cuBLAS CTranslate2 dlopens (2026-10-03)."""
+
+    def _patch(self, monkeypatch, outcomes):
+        calls = iter(outcomes)
+
+        def ensure():
+            outcome = next(calls)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr("speakerscribe.environment.ensure_ctranslate2_cuda_libs", ensure)
+        monkeypatch.setattr(
+            "speakerscribe.environment.ctranslate2_cublas_soname", lambda: "libcublas.so.12"
+        )
+
+    def test_already_loadable_installs_nothing(self, monkeypatch):
+        from speakerscribe.batch.colab import provide_ctranslate2_cuda_libs
+
+        self._patch(monkeypatch, [{"soname": "libcublas.so.12", "source": "system"}])
+        ran = []
+        info = provide_ctranslate2_cuda_libs(install=True, run=lambda *a, **k: ran.append(a))
+        assert info["source"] == "system" and ran == []
+
+    def test_missing_outside_colab_raises_with_the_fix(self, monkeypatch):
+        from speakerscribe.batch.colab import provide_ctranslate2_cuda_libs
+
+        self._patch(monkeypatch, [EnvironmentIncompatibleError("pip install nvidia-cublas-cu12")])
+        with pytest.raises(EnvironmentIncompatibleError, match="nvidia-cublas-cu12"):
+            provide_ctranslate2_cuda_libs(install=False, run=lambda *a, **k: None)
+
+    def test_missing_in_colab_installs_once_then_preloads(self, monkeypatch):
+        from speakerscribe.batch.colab import provide_ctranslate2_cuda_libs
+
+        self._patch(
+            monkeypatch,
+            [
+                EnvironmentIncompatibleError("missing"),
+                {"soname": "libcublas.so.12", "source": "/x"},
+            ],
+        )
+        commands = []
+
+        def run(cmd, **kwargs):
+            commands.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        info = provide_ctranslate2_cuda_libs(install=True, run=run, emit=lambda _: None)
+        assert commands[0][-1] == "nvidia-cublas-cu12>=12.4,<13"
+        assert info == {"soname": "libcublas.so.12", "source": "/x",
+                        "installed": "nvidia-cublas-cu12>=12.4,<13"}  # fmt: skip
+
+    def test_pip_failure_is_an_environment_error(self, monkeypatch):
+        from speakerscribe.batch.colab import provide_ctranslate2_cuda_libs
+
+        self._patch(monkeypatch, [EnvironmentIncompatibleError("missing")])
+        failed = types.SimpleNamespace(returncode=1, stdout="", stderr="No space left on device")
+        with pytest.raises(EnvironmentIncompatibleError, match="No space left"):
+            provide_ctranslate2_cuda_libs(
+                install=True, run=lambda *a, **k: failed, emit=lambda _: None
+            )
 
 
 class TestTelemetry:

@@ -63,6 +63,24 @@ Versioning: [Semantic Versioning](https://semver.org/)
   values (`PROBAR_SOLO`, flags set to `True`).
 
 ### Fixed
+- **GPU transcription on CUDA 13 runtimes** (Colab with torch `+cu130`):
+  every CTranslate2 4.x wheel (4.8.2 included) dlopens `libcublas.so.12` on
+  the first GPU matmul. The failure therefore surfaced mid-file, after
+  Whisper loaded, as `RuntimeError: Library libcublas.so.12 is not found or
+  cannot be loaded`.
+  - `environment.ensure_ctranslate2_cuda_libs()` runs before Whisper loads
+    on CUDA. It reads the soname from the CTranslate2 binary and preloads
+    cuBLAS by absolute path from pip's `nvidia-cublas-cu12` (`RTLD_LOCAL`:
+    torch's cuBLAS 13 is untouched). If cuBLAS is missing, it fails with
+    the fix.
+  - The batch's GPU preflight installs `nvidia-cublas-cu12` once per VM in
+    Colab (~600 MB), before any attempt is spent. Elsewhere, use
+    `pip install "speakerscribe[cuda12]"`.
+  - `is_environment_error` recognizes cuBLAS and shared-library loader
+    failures, so they no longer consume retry attempts.
+  - The journal re-reads past failures with today's rules: a failure
+    recorded as per-file before its marker existed stops counting as an
+    attempt.
 - `tests/test_cli.py` no longer imports `click`, which typer ≥ 0.27 stopped
   depending on.
 

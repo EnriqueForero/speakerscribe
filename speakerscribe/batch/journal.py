@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from speakerscribe.batch.fsio import utc_now
+from speakerscribe.environment import is_environment_error_text
 
 JOURNAL_SCHEMA = 6
 """v5 wrote 5; v6 only adds event types and fields (backward compatible)."""
@@ -59,6 +60,23 @@ class Event(str, Enum):
 
 SUCCESS_EVENTS = frozenset({Event.COMPLETED.value, Event.REUSED.value, Event.REPUBLISHED.value})
 ATTEMPT_EVENTS = frozenset({Event.FAILED_RETRYABLE.value, Event.QUALITY_REJECTED.value})
+
+
+def _environmental_failure(rec: dict[str, Any]) -> bool:
+    """A ``failed_retryable`` that today's rules classify as environmental.
+
+    Errors are re-read with the current classifier, so a failure journaled
+    as per-file before its marker existed (``libcublas.so.12`` on
+    2026-10-03) stops consuming a retry attempt. Diarization failures of one
+    file (``stage == "diar_file"``) always count.
+    """
+    return (
+        rec.get("event") == Event.FAILED_RETRYABLE.value
+        and rec.get("stage") != "diar_file"
+        and is_environment_error_text(rec.get("error"))
+    )
+
+
 """Events that consume one retry attempt of a job. Environment failures and
 probe/stability hiccups never do: retrying them cannot change the outcome."""
 
@@ -157,7 +175,7 @@ class JournalIndex:
                 index.dirty.discard(sid)
             elif event == Event.SPEAKERS_RENAMED.value and sid:
                 index.renames[sid] = str(rec.get("rename_sha") or "")
-            if job_id and event in ATTEMPT_EVENTS:
+            if job_id and event in ATTEMPT_EVENTS and not _environmental_failure(rec):
                 index.attempts[job_id] = index.attempts.get(job_id, 0) + 1
             elif job_id and event == Event.ATTEMPTS_RESET.value:
                 index.attempts.pop(job_id, None)

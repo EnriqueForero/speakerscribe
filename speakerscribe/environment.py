@@ -13,16 +13,34 @@ Why this module exists:
        for every file) apart from a problem with one file, so orchestrators
        stop the batch instead of burning GPU quota on every remaining file.
 
+    On 2026-10-03 the next layer surfaced: Colab's image moved to CUDA 13
+    (torch +cu130), which ships ``libcublas.so.13`` only, while every
+    CTranslate2 4.x wheel dlopens ``libcublas.so.12`` on the first GPU
+    matmul — after the model loaded, in the middle of the first file.
+    `ensure_ctranslate2_cuda_libs()` makes that library loadable (or fails
+    with the fix) BEFORE Whisper is loaded.
+
 Public API:
     EnvironmentIncompatibleError — Raised when the stack cannot decode audio.
     check_audio_decoding         — Fast decoding self-test (no GPU, no model).
     package_versions             — Installed versions of the audio/ML stack.
     is_environment_error         — Classify an exception as environmental.
+    is_environment_error_text    — Same, from a journaled ``Type: message``.
+    ensure_ctranslate2_cuda_libs — Make CTranslate2's cuBLAS loadable.
 """
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import functools
+import glob
 import importlib.metadata as importlib_metadata
+import importlib.util
+import mmap
+import re
+import site
+import sys
 import tempfile
 import wave
 from pathlib import Path
@@ -63,12 +81,25 @@ a transient per-file hiccup, not a reason to stop the batch."""
 _ENVIRONMENT_MESSAGE_MARKERS: tuple[str, ...] = (
     "cuda error",
     "cudnn",
-    "cublas_status",
-    "libcudnn",
+    "cublas",  # CUBLAS_STATUS_*, libcublas.so.N, libcublasLt.so.N
     "undefined symbol",
     "no kernel image is available",
+    "is not found or cannot be loaded",  # CTranslate2's dlopen failure
+    "cannot open shared object file",  # glibc loader
 )
-"""RuntimeError messages that point at the CUDA/driver stack (not OOM)."""
+"""Messages (RuntimeError/OSError) that point at the CUDA/driver stack (not OOM)."""
+
+_ENVIRONMENT_TYPE_NAMES: frozenset[str] = frozenset(
+    {
+        "ImportError",
+        "ModuleNotFoundError",
+        "AttributeError",
+        "TypeError",
+        "NameError",
+        "EnvironmentIncompatibleError",
+    }
+)
+"""`ENVIRONMENT_ERROR_TYPES` by name, for errors known only as journaled text."""
 
 
 class EnvironmentIncompatibleError(RuntimeError):
@@ -108,14 +139,40 @@ def is_environment_error(exc: BaseException) -> bool:
     Returns:
         True if the same failure is expected for every remaining file.
     """
-    if isinstance(exc, ENVIRONMENT_ERROR_TYPES):
+    if isinstance(exc, (*ENVIRONMENT_ERROR_TYPES, EnvironmentIncompatibleError)):
         return True
-    if isinstance(exc, RuntimeError):
-        message = str(exc).lower()
-        if "out of memory" in message:
-            return False
-        return any(marker in message for marker in _ENVIRONMENT_MESSAGE_MARKERS)
+    if isinstance(exc, RuntimeError | OSError):
+        return _message_is_environmental(str(exc))
     return False
+
+
+def _message_is_environmental(message: str) -> bool:
+    lowered = message.lower()
+    if "out of memory" in lowered:
+        return False
+    return any(marker in lowered for marker in _ENVIRONMENT_MESSAGE_MARKERS)
+
+
+def is_environment_error_text(text: str | None) -> bool:
+    """`is_environment_error` for an error known only as ``"Type: message"`` text.
+
+    Lets a journal re-read old failures with today's rules: a failure that
+    was recorded as a per-file error before a marker existed (e.g.
+    ``RuntimeError: Library libcublas.so.12 is not found or cannot be
+    loaded`` on 2026-10-03) stops counting as a consumed retry attempt.
+
+    Args:
+        text: ``sanitize_error`` output, e.g. ``"RuntimeError: ..."``.
+
+    Returns:
+        True if the text describes a broken environment.
+    """
+    if not text:
+        return False
+    type_name, sep, message = text.partition(":")
+    if sep and type_name.strip() in _ENVIRONMENT_TYPE_NAMES:
+        return True
+    return _message_is_environmental(message if sep else text)
 
 
 def _write_selftest_wav(path: Path, sample_rate: int) -> None:
@@ -203,11 +260,134 @@ def check_audio_decoding(
     return report
 
 
+# ── CTranslate2 ↔ CUDA runtime libraries ──────────────────────────────────
+
+_DEFAULT_CT2_CUBLAS = "libcublas.so.12"
+_CUBLAS_SONAME = re.compile(rb"libcublas\.so\.(\d+)")
+_PRELOADED: list[ctypes.CDLL] = []  # keep handles alive for the process lifetime
+
+
+@functools.lru_cache(maxsize=1)
+def ctranslate2_cublas_soname() -> str:
+    """The cuBLAS soname the installed CTranslate2 dlopens (e.g. ``libcublas.so.12``).
+
+    Read from the bundled ``libctranslate2`` binary (cheap: one mmap'd regex
+    scan, cached), so a future CTranslate2 built for another CUDA major is
+    handled without a code change. Falls back to ``libcublas.so.12``, the
+    soname of every CTranslate2 4.x wheel up to 4.8.2.
+    """
+    spec = importlib.util.find_spec("ctranslate2")
+    if spec is None or not spec.origin:
+        return _DEFAULT_CT2_CUBLAS
+    package = Path(spec.origin).parent
+    for binary in sorted(
+        [*package.parent.glob("ctranslate2.libs/libctranslate2*.so*"), *package.glob("*.so*")]
+    ):
+        try:
+            with binary.open("rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                match = _CUBLAS_SONAME.search(mm)
+                major = match.group(1).decode() if match else None  # read before unmapping
+        except (OSError, ValueError, TypeError):
+            continue
+        if major:
+            return f"libcublas.so.{major}"
+    return _DEFAULT_CT2_CUBLAS
+
+
+def _library_dirs() -> list[Path]:
+    """Directories where pip's ``nvidia-*`` wheels and CUDA toolkits put libraries."""
+    bases: list[str] = [*sys.path]
+    with contextlib.suppress(AttributeError):  # virtualenvs without the site helpers
+        bases += [*site.getsitepackages(), site.getusersitepackages()]
+    dirs: list[Path] = []
+    for base in dict.fromkeys(b for b in bases if b):
+        nvidia = Path(base) / "nvidia"
+        if nvidia.is_dir():
+            dirs += sorted(p for p in nvidia.glob("*/lib") if p.is_dir())
+    dirs += [Path(p) for p in sorted(glob.glob("/usr/local/cuda*/lib64"))]
+    dirs += [Path(p) for p in sorted(glob.glob("/usr/local/cuda*/targets/x86_64-linux/lib"))]
+    return dirs
+
+
+def _loadable(soname: str) -> bool:
+    try:
+        ctypes.CDLL(soname)
+    except OSError:
+        return False
+    return True
+
+
+def ensure_ctranslate2_cuda_libs(*, library_dirs: list[Path] | None = None) -> dict[str, Any]:
+    """Make the cuBLAS that CTranslate2 dlopens loadable in this process.
+
+    CTranslate2 loads cuBLAS lazily (``dlopen("libcublas.so.12")``) on the
+    first GPU matmul, so a missing library would only surface mid-file,
+    after the model loaded. Call this before loading Whisper on CUDA.
+
+    Strategy:
+        1. The soname already resolves (system CUDA 12, or a torch built
+           for CUDA 12 preloaded it) → nothing to do.
+        2. A copy exists in a known directory (pip ``nvidia-cublas-cu12``,
+           ``/usr/local/cuda-12*``) → preload it by absolute path. Its
+           ``RUNPATH=$ORIGIN`` pulls in ``libcublasLt`` from the same
+           directory; the matching ``libnvrtc`` is preloaded too when
+           present. Loading is ``RTLD_LOCAL``: CTranslate2's later dlopen by
+           soname reuses these handles, while torch's own cuBLAS (e.g. 13)
+           keeps resolving its symbols — no interposition.
+        3. Otherwise raise `EnvironmentIncompatibleError` with the fix.
+
+    Args:
+        library_dirs: Directories to search (tests); defaults to pip's
+            ``nvidia/*/lib`` folders on ``sys.path`` and CUDA toolkits.
+
+    Returns:
+        ``{"soname": ..., "source": "system" | "<absolute path>"}``.
+
+    Raises:
+        EnvironmentIncompatibleError: The library cannot be found anywhere.
+    """
+    soname = ctranslate2_cublas_soname()
+    if _loadable(soname):
+        return {"soname": soname, "source": "system"}
+    major = soname.rsplit(".", 1)[-1]
+    for directory in library_dirs if library_dirs is not None else _library_dirs():
+        candidate = directory / soname
+        if not candidate.is_file():
+            continue
+        nvrtc = f"libnvrtc.so.{major}"
+        for helper in [directory / nvrtc, *sorted(directory.parent.parent.glob(f"*/lib/{nvrtc}"))]:
+            if not helper.is_file():
+                continue
+            with contextlib.suppress(OSError):  # optional: only runtime-compiled kernels use it
+                _PRELOADED.append(ctypes.CDLL(str(helper)))
+        try:
+            _PRELOADED.append(ctypes.CDLL(str(candidate)))
+        except OSError as e:
+            raise EnvironmentIncompatibleError(
+                f"{candidate} exists but cannot be loaded: {e}"
+            ) from e
+        if not _loadable(soname):  # exactly the lookup CTranslate2 will perform
+            raise EnvironmentIncompatibleError(
+                f"Preloaded {candidate}, but {soname} still does not resolve by name."
+            )
+        logger.info(f"CTranslate2 cuBLAS preloaded: {candidate}")
+        return {"soname": soname, "source": str(candidate)}
+    raise EnvironmentIncompatibleError(
+        f"Library {soname} is not found or cannot be loaded: CTranslate2 (faster-whisper) "
+        f"needs CUDA {major} cuBLAS on the GPU, and this runtime does not have it "
+        f'(e.g. a CUDA 13 image). Fix: pip install "nvidia-cublas-cu{major}" '
+        f'(or pip install "speakerscribe[cuda{major}]") and run again.'
+    )
+
+
 __all__ = [
     "ENVIRONMENT_ERROR_TYPES",
     "STACK_PACKAGES",
     "EnvironmentIncompatibleError",
     "check_audio_decoding",
+    "ctranslate2_cublas_soname",
+    "ensure_ctranslate2_cuda_libs",
     "is_environment_error",
+    "is_environment_error_text",
     "package_versions",
 ]

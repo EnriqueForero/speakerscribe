@@ -3,7 +3,8 @@
 * `check_storage` — no GPU, no token: a session with nothing pending never
   needs either.
 * `check_gpu_stack` — only when real GPU work exists: CUDA, VRAM, the audio
-  decoding self-test (the 2026-10-01 PyAV break) and HuggingFace access.
+  decoding self-test (the 2026-10-01 PyAV break), the cuBLAS CTranslate2
+  dlopens mid-file (the 2026-10-03 CUDA 13 break) and HuggingFace access.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import importlib
 import shutil
 from typing import TYPE_CHECKING, Any
 
+from speakerscribe.batch.colab import provide_ctranslate2_cuda_libs
 from speakerscribe.batch.errors import sanitize_error
 from speakerscribe.batch.paths import BatchPaths
 
@@ -158,12 +160,20 @@ def check_gpu_stack(
             f"Disco local insuficiente: {free / 1e9:.1f} GB libres, ~{needed / 1e9:.1f} GB requeridos."
         )
     warnings = check_hf_access(config)
+    try:  # last: in Colab it may download ~600 MB once per VM
+        cuda_libs = provide_ctranslate2_cuda_libs()
+    except Exception as e:
+        raise PreflightError(
+            f"CTranslate2 no puede usar la GPU: {sanitize_error(e)}. Alternativa: "
+            "Entorno de ejecución → Cambiar tipo de entorno → una versión anterior del entorno."
+        ) from e
     return {
         "gpu": gpu,
         "vram_gb": round(vram_gb, 2),
         "scratch_free_gb": round(free / 1e9, 2),
         "versions": package_versions(),
         "audio_decoding": decoding,
+        "cuda_libs": cuda_libs,
         "warnings": warnings,
     }
 
