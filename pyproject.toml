@@ -52,6 +52,9 @@ bench = [
     "pyannote.metrics>=4.0,<5.0",
 ]
 dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-mock>=3.12", "ruff==0.9.0", "mypy>=1.10"]
+# CTranslate2 4.x dlopens CUDA 12 cuBLAS (libcublas.so.12); CUDA 13 images (e.g. Colab
+# with torch +cu130) lack it. The batch installs it by itself in Colab; elsewhere: this.
+cuda12 = ["nvidia-cublas-cu12>=12.4,<13"]
 
 [project.scripts]
 speakerscribe = "speakerscribe.cli:app"

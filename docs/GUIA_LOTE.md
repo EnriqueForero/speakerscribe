@@ -50,6 +50,7 @@ En modo prueba la máquina **no** se apaga al final, para que pueda revisar. Los
 |---|---|---|
 | Colab corta la sesión | Lo confirmado está a salvo; el archivo en curso se rehace | Vuelva a ejecutar todo |
 | Error de entorno (librerías, CUDA, token) | Se detiene sin gastar intentos; la máquina **no** se apaga | Ejecute la celda 8 (autopsia) y comparta la salida |
+| Colab sin cuBLAS de CUDA 12 (imágenes con CUDA 13) | Antes de cargar modelos instala `nvidia-cublas-cu12`, una vez por máquina (~600 MB, menos de un minuto) | Nada. Si aun así falla: *Cambiar tipo de entorno → Versión del entorno* anterior (p. ej. 2026.07) |
 | La diarización falla en un archivo | Lo reintenta en la siguiente sesión; en el último intento lo publica **marcado** | Revise `pendientes_revision.json` |
 | Usted renombró o editó un `.txt` (p. ej. quitó el `*`) | Lo respeta y lo informa; no lo regenera | Nada |
 | Ya existe un archivo con ese nombre en `entregables/` que el lote no creó | El nuevo sale como `nombre~<id>.txt`; el suyo queda intacto | Nada |

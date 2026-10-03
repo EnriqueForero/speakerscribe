@@ -9,6 +9,48 @@ Convenciones:
 
 ---
 
+## 2026-10-03 — Prueba real con «Tres ejes»: Colab ya no trae cuBLAS de CUDA 12
+
+### Qué pasó (HECHO, salidas del notebook y journal)
+- La revinculación funcionó (`workspace_rebound`). El modo prueba encontró 1 archivo.
+- En la T4:
+  - pyannote cargó en 6,1 s y Whisper large-v3 en 34,2 s;
+  - la diarización salió de la caché (172 turnos);
+  - el idioma se detectó como `es` (100 %).
+- En el **primer cálculo** del modelo en GPU: `RuntimeError: Library libcublas.so.12 is not found or cannot be loaded` (`faster_whisper … self.model.encode`).
+- El lote lo registró como fallo **del archivo** (`failed_retryable`), así que gastó 1 de 2 intentos. Era un error de entorno: el clasificador no reconocía `libcublas`.
+- La máquina quedó encendida («sin entregables») y no se movió nada.
+
+### Causa
+- HECHO, inspección de la rueda: `ctranslate2==4.8.2` (la última, 2026-08-31) carga `libcublas.so.12` por `dlopen` al primer cálculo, no al importar. Solo necesita eso y el driver (`libcuda.so.1`).
+- HECHO: los tracebacks del journal muestran Python 3.13 desde el 2026-10-01. La última transcripción exitosa fue el 2026-09-25.
+- HECHO, fuentes secundarias:
+  - [googlecolab/colabtools#6081](https://github.com/googlecolab/colabtools/issues/6081) anunció Python 3.13 y la opción de volver a las versiones de entorno «26.07, 26.04».
+  - [ARENA_materials#529](https://github.com/ARENA-education/ARENA_materials/issues/529) (2026-09-26) reporta Colab con `torch 2.11.0+cu130`, es decir, CUDA 13, que trae `libcublas.so.13`.
+- INFERENCIA: la imagen de Colab pasó a CUDA 13 entre el 2026-09-25 y el 2026-10-01.
+  - Hasta entonces, el cuBLAS 12 llegaba como dependencia de torch.
+  - El fallo de PyAV del 2026-10-01 ocurría **antes** de la GPU y ocultaba este.
+- VACÍO: la fecha exacta del cambio de imagen. Fuente para confirmarla: las notas de versión de Colab (`colab.research.google.com/notebooks/relnotes.ipynb`).
+
+### Cambios (HECHO)
+- **Precarga de cuBLAS** (`environment.ensure_ctranslate2_cuda_libs`), antes de cargar Whisper en CUDA:
+  - lee del binario de CTranslate2 qué cuBLAS necesita;
+  - si no resuelve, lo precarga por ruta absoluta desde la rueda `nvidia-cublas-cu12`, sin tocar el cuBLAS 13 de torch;
+  - si no existe, falla con la solución.
+- **Instalación automática en Colab**: el chequeo previo de GPU instala `nvidia-cublas-cu12` una vez por máquina, antes de gastar intentos. Fuera de Colab: `pip install "speakerscribe[cuda12]"`.
+- **Clasificación**: `libcublas` y los fallos del cargador de librerías son errores de entorno; no gastan intentos.
+- **Auto-sanado del journal**: los fallos antiguos se releen con las reglas actuales. Con el journal real, «Tres ejes» pasó de 1 intento gastado a 0.
+
+### Verificación (HECHO)
+- Con la librería real (`nvidia-cublas-cu12` 12.9.2.10, sin GPU):
+  - `libcublas.so.12` no resolvía;
+  - tras la precarga resuelve por nombre, que es la misma búsqueda que hace CTranslate2;
+  - el nombre se detectó del binario real de CTranslate2 4.8.2 en 0,07 s.
+- 450 pruebas en Python 3.10, 3.12 y 3.13, con cobertura del 81,7 %.
+- Límite: no hay GPU en el entorno de desarrollo. Que CTranslate2 calcule en la T4 con cuBLAS 12 junto al cuBLAS 13 de torch es INFERENCIA, y lo confirma la próxima prueba del dueño.
+
+---
+
 ## 2026-10-02 (tarde) — Primera corrida del dueño y notebook de publicación 0.4
 
 ### Contexto

@@ -103,11 +103,21 @@ def load_whisper_model(config: TranscriptionConfig) -> WhisperModel:
 
     Returns:
         Loaded WhisperModel instance.
+
+    Raises:
+        EnvironmentIncompatibleError: On CUDA, when the cuBLAS that
+            CTranslate2 needs cannot be loaded.
     """
     import torch
     from faster_whisper import WhisperModel
 
     device, compute_type = config.resolve_device()
+    if device == "cuda":
+        # CTranslate2 dlopens cuBLAS on the first GPU matmul, mid-file; fail
+        # (or fix) here instead. See environment.ensure_ctranslate2_cuda_libs.
+        from speakerscribe.environment import ensure_ctranslate2_cuda_libs
+
+        ensure_ctranslate2_cuda_libs()
     logger.info(f"Loading model '{config.model}' on {device.upper()} ({compute_type})...")
     t0 = time.time()
     model = WhisperModel(
