@@ -9,6 +9,40 @@ Convenciones:
 
 ---
 
+## 2026-10-03 (mañana) — Prueba real exitosa y preparación de la publicación 0.4.0
+
+### Resultado en Colab con T4 (HECHO, journal de Drive)
+- **Prueba con un archivo:** 1 OK (8,4 min de audio en 1,5 min).
+- **Lote completo:** **11 de 11 OK**, 0 fallidos, 0 marcados. Fueron 57,5 min de sesión para 9,4 h de audio, con RTF entre 18,1 y 22,7. Todo el lote: 12 de 12.
+- **Hubo un fallo más de `libcublas`** (02:28 UTC), al correr primero en la máquina vieja, sin el arreglo.
+  - Con el conteo anterior, «Tres ejes» habría quedado **bloqueado**, con 2 de 2 intentos.
+  - Lo destrabó la relectura del journal con las reglas actuales.
+
+### Antes de publicar (HECHO)
+- **Paquete construido desde `main` e inspeccionado:**
+  - versión 0.4.0;
+  - dependencias con `av<19`;
+  - comando `speakerscribe`;
+  - extra `cuda12`;
+  - `twine check` PASSED;
+  - sin datos ni notebooks.
+- **Celda D.PyPI corregida.**
+  - Antes:
+    - generaba su propio `pyproject.toml` (hatchling, **sin** el comando `speakerscribe`);
+    - aplicaba `ruff --fix` y `ruff format` sobre Drive;
+    - no limpiaba `dist/`;
+    - no comprobaba que Drive fuera igual a GitHub.
+  - Con `PUBLICAR_RELEASE = True` y *Ejecutar todo*, habría competido con GitHub Actions por subir la versión.
+  - Ahora:
+    - está apagada por defecto (`CONFIRMAR_PYPI_DIRECTO`);
+    - exige Drive = `main`;
+    - usa el `pyproject.toml` del repositorio;
+    - limpia `dist/`;
+    - solo revisa, sin modificar.
+- **`release.yml`** también se dispara al publicar un *Release* en github.com, serializado por tag. La subida es idempotente (`skip-existing`), y si el *Release* ya existe le adjunta los archivos. `actionlint` OK.
+
+---
+
 ## 2026-10-03 — Prueba real con «Tres ejes»: Colab ya no trae cuBLAS de CUDA 12
 
 ### Qué pasó (HECHO, salidas del notebook y journal)
@@ -164,6 +198,6 @@ Otros:
 | Qué | Quién | Cuándo | Cómo |
 |---|---|---|---|
 | Prueba real en GPU T4 con un audio corto | Dueño | Próxima sesión de Colab | [GUIA_LOTE.md § Primera vez](GUIA_LOTE.md#4-primera-vez-después-de-esta-actualización) |
-| Configurar el *trusted publisher* y el entorno `pypi`, y publicar 0.4.0 (PyPI sigue en 0.1.1) | Dueño + Claude | Después de una prueba exitosa | [GUIA_LOTE.md § Publicar](GUIA_LOTE.md#7-publicar-una-versión-en-pypi) |
+| Configurar el *trusted publisher* y el entorno `pypi`, y publicar 0.4.0 (PyPI sigue en 0.1.1). La prueba exitosa ya se hizo (2026-10-03). | Dueño | Cuando el dueño decida | [GUIA_LOTE.md § Publicar](GUIA_LOTE.md#7-publicar-una-versión-en-pypi) |
 | Sincronizar la copia de código en Drive con GitHub | Dueño | Antes de volver a usar el notebook de publicación | Celda S ([GUIA_LOTE.md § 9](GUIA_LOTE.md#9-notebook-de-publicación)) |
 | Quitar el tope `av<19` | Mantenimiento | Cuando faster-whisper publique el arreglo #1495 | Subir el mínimo de faster-whisper y retirar el tope |

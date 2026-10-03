@@ -5,11 +5,22 @@ name: Release
 # creates the GitHub Release. One-time setup on pypi.org: add a trusted
 # publisher (owner EnriqueForero, repo speakerscribe, workflow release.yml,
 # environment pypi) and create the `pypi` environment in GitHub settings.
+#
+# Two equivalent triggers: pushing the tag (git, the publication notebook)
+# or publishing a Release on github.com ("Draft a new release" → new tag).
+# If both fire for the same tag, runs are serialized and the second one is
+# a no-op (skip-existing on PyPI, assets re-attached to the Release).
 
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  release:
+    types: [published]
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -56,6 +67,8 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true  # a second trigger for the same tag is a no-op
 
   github-release:
     name: GitHub Release
@@ -69,7 +82,12 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: Create release with artifacts
+      - name: Create release with artifacts (or attach them to one made on github.com)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+          fi
