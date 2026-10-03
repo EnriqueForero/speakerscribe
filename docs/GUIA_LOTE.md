@@ -80,14 +80,36 @@ Regla del proyecto: **se publica solo después de una prueba exitosa en Colab**.
    - environment: `pypi`
 2. En GitHub, en *Settings → Environments → New environment*, cree el entorno `pypi`.
 
+Opcional: en *Settings → Environments → pypi*, si GitHub le ofrece *Required reviewers*, agréguese. Así el paso de PyPI espera su clic de aprobación.
+
 **Cada versión:**
-1. La versión vive **solo** en `speakerscribe/__init__.py` (`__version__`), y el CHANGELOG debe tener su sección.
-2. Con `main` en verde, se empuja el tag `vX.Y.Z`, por ejemplo `v0.4.0`.
+1. La versión vive **solo** en `speakerscribe/__init__.py` (`__version__`). El CHANGELOG debe tener su sección, con la fecha.
+2. Con `main` en verde, dispare `release.yml` de **una** de estas formas. Las tres son equivalentes:
+
+   | Vía | Cómo |
+   |---|---|
+   | **A. github.com** | *Releases → Draft a new release → Choose a tag*: escriba `vX.Y.Z` → *Create new tag on publish* (destino `main`) → *Publish release* |
+   | **B. Notebook de publicación** | Celdas A → B → **S** → en la Celda A `PUBLICAR_RELEASE = True` → **D.GitHub**. Crea y empuja el tag. |
+   | **C. git** | `git tag vX.Y.Z origin/main && git push origin vX.Y.Z` |
+
 3. `release.yml` hace el resto:
    - verifica que el tag coincida con la versión;
-   - construye el paquete;
-   - publica en PyPI sin tokens;
-   - crea el *Release* de GitHub.
+   - construye el paquete con el `pyproject.toml` del repositorio;
+   - lo publica en PyPI sin tokens;
+   - crea el *Release* de GitHub, o le adjunta los archivos si se creó en la web.
+4. Verifique:
+   - el flujo en verde en *Actions*;
+   - la versión en https://pypi.org/project/speakerscribe/;
+   - `pip install speakerscribe==X.Y.Z` en un Colab nuevo.
+
+**Si falla el paso de PyPI** (p. ej. el *trusted publisher* mal configurado): corríjalo y use *Re-run failed jobs* en *Actions*. **No** cree otro tag.
+
+**Es irreversible:** PyPI no permite volver a subir un mismo archivo, ni aunque se borre ([PyPI, file name reuse](https://pypi.org/help/#file-name-reuse)). Un error se corrige con una versión nueva (p. ej. 0.4.1) y, si hace falta, marcando la mala como *yanked*.
+
+**Emergencia (sin GitHub Actions):** la celda **D.PyPI** del notebook sube con un token (`PYPI_TOKEN`).
+- Está apagada por defecto: se activa con `CONFIRMAR_PYPI_DIRECTO = True`.
+- Solo publica si su Drive es idéntico a GitHub `main`.
+- Usa el mismo `pyproject.toml` del repositorio.
 
 Mientras 0.4.0 no esté en PyPI, el notebook la instala desde GitHub `main`: la celda 2 lo hace sola.
 

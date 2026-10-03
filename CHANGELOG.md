@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ---
 
-## [0.4.0] — 2026-10-02
+## [0.4.0] — 2026-10-03
 
 > New `speakerscribe.batch`: the resumable Google Drive + Colab batch that
 > lived in a ~3,700-line notebook (v5) is now a tested package. The notebook
